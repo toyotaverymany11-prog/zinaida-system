@@ -1,0 +1,85 @@
+{
+  "version": "2.0",
+  "created": "2026-07-07",
+  "updated": "2026-07-07",
+  
+  "character": {
+    "name": "Зинаида",
+    "full_name": "Зинаида — AI-эксперт по мужской психологии",
+    "role": "Автор, эксперт, лицо бренда контент-фабрики",
+    "niche": "Мужская психология / Отношения",
+    "target_audience": "Женщины 18-40",
+    "positioning": "Preventive maintenance — отношения как навык, не как спасение",
+    "tone_of_voice": "Уверенный, экспертный, провокационный, тёплый, честный"
+  },
+
+  "appearance": {
+    "age_visual": "30-38",
+    "build": "Стройная, подтянутая",
+    "hair": "Тёмные волосы с рыжими/auburn кончиками, длинные",
+    "face": "Выразительные черты, прямой уверенный взгляд",
+    "skin": "Светлая, ухоженная",
+    "style": "Белая рубашка навыпуск + чёрная юбка или кожаные брюки",
+    "accessories": ["AR-очки", "Умные часы", "Колье с именем"],
+    "vibe": "Уверенность, сексуальность, технологичность, сила, интеллект",
+    "setting": "Панорамные окна, пальмы, море, лакшери-интерьер"
+  },
+
+  "prompt_description_en": "A confident elegant woman in her early 30s, dark hair with auburn/copper tips, wearing a white oversized shirt, black skirt or leather pants, AR glasses on head, smart watch, name necklace. Direct gaze at camera, slight knowing smile. Setting: panoramic windows with palm trees and sea view, luxury modern interior. Vibe: confidence, intelligence, power, sensuality. Professional editorial photography style.",
+  
+  "prompt_description_short_en": "Elegant confident woman, 30s, dark hair with auburn tips, white shirt, AR glasses, luxury interior with sea view",
+  
+  "usage_rules": {
+    "variant_1_magazine": "Использовать как ФОНОВЫЙ элемент (30% opacity, затемнённая). Текст — главный герой.",
+    "variant_2_quote": "НЕ использовать. Только текст на фоне.",
+    "variant_3_scene": "НЕ использовать в драматических сценах. Она — автор, не героиня драмы.",
+    "general": "Зинаида = эксперт, наблюдатель, 'та, которая знает'. Никогда не жертва, не в панике."
+  },
+
+  "emotions_allowed": [
+    {"emotion": "Уверенный прямой взгляд", "frequency": "40%", "context": "Основные посты"},
+    {"emotion": "Лёгкая улыбка", "frequency": "30%", "context": "Позитивные темы"},
+    {"emotion": "Задумчивость", "frequency": "15%", "context": "Глубокие темы"},
+    {"emotion": "Ирония/усмешка", "frequency": "10%", "context": "Провокационные посты"},
+    {"emotion": "Серьёзность", "frequency": "5%", "context": "Тяжёлые темы (токсичность)"}
+  ],
+  "emotions_forbidden": ["Страх", "Паника", "Слёзы", "Растерянность", "Подчинение"],
+
+  "brand_identity": {
+    "colors": {
+      "primary_black": "#1A1A1A",
+      "accent_bordeaux": "#8B0000",
+      "gold": "#C9A84C",
+      "warm_beige": "#F5E6D0",
+      "deep_blue": "#1B2A4A",
+      "dark_bordeaux": "#5C1A1A"
+    },
+    "fonts": {
+      "heading": "Playfair Display / Didone serif",
+      "body": "Inter / Montserrat",
+      "quote": "Cormorant Garamond Italic",
+      "prompt_desc": "elegant high-contrast serif font, Didone style, thin serifs, bold vertical strokes"
+    },
+    "logo": "♦ или текстовый «З»",
+    "style": "Minimaximalism 2026 — чистый лейаут + ЖИРНАЯ типографика + контрастные цвета"
+  },
+
+  "source_photos": {
+    "directory": "/opt/zinaida/design/references/zinaida_face",
+    "files": [
+      {"name": "IMG_0413.PNG", "description": "Основной ракурс — анфас"},
+      {"name": "IMG_0415.PNG", "description": "Дополнительный ракурс"},
+      {"name": "IMG_9391.JPG", "description": "Альтернативный вид"}
+    ],
+    "required_angles": ["анфас", "профиль", "3/4 поворот", "вид сбоку"],
+    "required_for_video": ["поворот головы", "жесты рук", "ходьба"],
+    "notes": "Для полноценной видео-генерации нужны дополнительные ракурсы и части тела"
+  },
+
+  "how_to_use": {
+    "for_image_generation": "Прикрепить этот файл как контекст. Использовать prompt_description_en в промптах.",
+    "for_video_generation": "Использовать source_photos как seed-изображения + prompt_description_en",
+    "for_any_ai_tool": "Передать prompt_description_en или prompt_description_short_en как описание персонажа",
+    "consistency": "ВСЕГДА использовать одно и то же описание для сохранения консистентности образа"
+  }
+}

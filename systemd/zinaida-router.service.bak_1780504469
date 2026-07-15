@@ -1,0 +1,19 @@
+[Unit]
+Description=Zinaida Router Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+EnvironmentFile=/opt/zinaida/meta_agent/.env
+ExecStartPre=/bin/bash -c 'fuser -k 8002/tcp 2>/dev/null || true'
+ExecStart=/usr/bin/python3 -u /opt/zinaida/meta_agent/zinaida_router.py
+Restart=on-failure
+RestartSec=5
+MemoryMax=512M
+StandardOutput=append:/opt/zinaida/logs/zinaida_router.log
+StandardError=append:/opt/zinaida/logs/zinaida_router.log
+
+[Install]
+WantedBy=multi-user.target

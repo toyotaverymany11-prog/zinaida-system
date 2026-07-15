@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes Group Chat Agent Client v2 — Оля + Зинаида
+After=network.target hermes-web-ui.service
+Requires=hermes-web-ui.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /opt/zinaida/scripts/gc_agent_v2.py
+WorkingDirectory=/opt/zinaida/scripts
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=append:/var/log/gc-agent-v2.log
+StandardError=append:/var/log/gc-agent-v2.log
+
+[Install]
+WantedBy=multi-user.target

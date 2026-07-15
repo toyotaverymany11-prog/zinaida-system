@@ -1,0 +1,21 @@
+[Unit]
+Description=Zinaida Autonomy Engine v3.9.3
+After=network.target zinaida-gateway.service
+Wants=zinaida-gateway.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+ExecStartPre=/usr/bin/python3 /opt/zinaida/meta_agent/reset_state.py
+ExecStart=/usr/bin/python3 -u /opt/zinaida/meta_agent/autonomy_engine_v3.py
+ExecStartPost=/bin/bash -c 'systemctl show -p MainPID zinaida-engine.service | cut -d= -f2 > /opt/zinaida/logs/autonomy_engine_v3.pid'
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/zinaida/logs/autonomy_engine_v3.log
+StandardError=append:/opt/zinaida/logs/autonomy_engine_v3.log
+
+[Install]
+WantedBy=multi-user.target

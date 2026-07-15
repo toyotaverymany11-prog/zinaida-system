@@ -1,0 +1,14 @@
+[Unit]
+Description=Hermes Group Chat Agent Repair
+After=hermes-web-ui.service
+Requires=hermes-web-ui.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/zinaida/scripts/group_chat_repair.py
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=2
+
+[Install]
+WantedBy=hermes-web-ui.service

@@ -1,0 +1,104 @@
+import os, json, requests, time, sys, asyncio, concurrent.futures, subprocess
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+CORE_PATH = "/opt/zinaida/memory/knowledge/CORE.md"
+SNAPSHOT_PATH = "/root/workspace/SYSTEM_SNAPSHOT.md"
+NICHES_DIR = "/root/workspace/niches"
+
+PROVIDERS = [
+    {"name": "zhipu", "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions", "key": os.getenv("ZHIPU_API_KEY",""), "model": "glm-4-flash"},
+    {"name": "github", "url": "https://models.inference.ai.azure.com/chat/completions", "key": os.getenv("GITHUB_TOKEN",""), "model": "gpt-4o-mini"},
+    {"name": "openrouter", "url": "https://openrouter.ai/api/v1/chat/completions", "key": os.getenv("OPENROUTER_API_KEY",""), "model": "mistralai/mistral-7b-instruct:free"},
+    {"name": "gigachat", "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions", "key": os.getenv("GIGACHAT_TOKEN",""), "model": "GigaChat"},
+    {"name": "mistral", "url": "https://api.mistral.ai/v1/chat/completions", "key": os.getenv("MISTRAL_API_KEY",""), "model": "mistral-small-latest"}
+]
+
+TOOL_WHITELIST = {
+    "тест": ["python3", "/opt/zinaida/sandbox/tg_brief_bot/self_test_chain.py"],
+    "синхронизация": ["bash", "-c", "mkdir -p /opt/zinaida/memory/niches/villa_sales; cp -u /root/workspace/niches/villa_sales/skills/lessons.md /opt/zinaida/memory/niches/villa_sales/ 2>/dev/null; cp -u /root/workspace/niches/villa_sales/session_state.json /opt/zinaida/memory/niches/villa_sales/ 2>/dev/null; echo '✅ Синхронизация памяти завершена'"]
+}
+
+def load_file(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f: return f.read()
+    except Exception: return ""
+
+def run_tool_sync(tool_key):
+    cmd = TOOL_WHITELIST.get(tool_key.lower().strip())
+    if not cmd: return "[ИНСТРУМЕНТ НЕ НАЙДЕН В БЕЛОМ СПИСКЕ]"
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd="/opt/zinaida/sandbox")
+        return res.stdout[:2500] if res.returncode == 0 else f"[ОШИБКА ВЫПОЛНЕНИЯ]: {res.stderr[:500]}"
+    except Exception as e:
+        return f"[СБОЙ ИНСТРУМЕНТА]: {str(e)}"
+
+def build_system_prompt(user_text, niche_id=None, tool_result=None):
+    core = load_file(CORE_PATH) or "Ты — Зинаида, руководитель маркетингового агентства. Говори в женском роде."
+    
+    if user_text.strip().upper().startswith("[СИСТЕМА]"):
+        snapshot = load_file(SNAPSHOT_PATH) or "[Слепок системы недоступен]"
+        return f"{core}\n\n[СИСТЕМНЫЙ РЕЖИМ]\nТекущее состояние сервера и компонентов:\n{snapshot}\n\nОтветь кратко, по делу, используя только факты из слепка. Не выдумывай статусы."
+    
+    if tool_result:
+        return f"{core}\n\n[РЕЗУЛЬТАТ ИНСТРУМЕНТА]\n{tool_result}\n\nОформи результат кратко, профессионально, в женском роде. Если есть ошибки — предложи решение."
+    
+    prompt = core
+    if niche_id:
+        brief = load_file(os.path.join(NICHES_DIR, niche_id, "brief.md"))
+        tone = load_file(os.path.join(NICHES_DIR, niche_id, "tone.md"))
+        if brief: prompt += f"\n\n[КОНТЕКСТ НИШИ]\n{brief}"
+        if tone: prompt += f"\n\n[СТИЛЬ И ОГРАНИЧЕНИЯ]\n{tone}"
+    return prompt
+
+def call_provider(messages, system_prompt):
+    payload_msgs = [{"role": "system", "content": system_prompt}] + messages
+    for p in PROVIDERS:
+        if not p["key"]: continue
+        try:
+            headers = {"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"}
+            if p["name"] == "openrouter": headers["HTTP-Referer"] = "https://zinaida.local"
+            payload = {"model": p["model"], "messages": payload_msgs, "temperature": 0.4, "max_tokens": 1500}
+            resp = requests.post(p["url"], json=payload, headers=headers, timeout=25)
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if content: return content
+        except Exception:
+            continue
+    return "[ОШИБКА: Все провайдеры недоступны. Проверь ключи и сеть.]"
+
+@app.get("/health")
+def health():
+    return {"status":"ok","router":"zinaida_with_provider_fallback_v1"}
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        messages = data.get("messages", [])
+        user_text = messages[-1].get("content", "") if messages else ""
+        niche_id = data.get("niche_id") or request.headers.get("x-niche-id")
+        
+        tool_result = None
+        lower_text = user_text.strip().lower()
+        if lower_text.startswith("[тест]"):
+            tool_result = await asyncio.to_thread(run_tool_sync, "тест")
+        elif lower_text.startswith("[синхронизация]"):
+            tool_result = await asyncio.to_thread(run_tool_sync, "синхронизация")
+            
+        system_prompt = build_system_prompt(user_text, niche_id, tool_result)
+        reply = call_provider(messages, system_prompt)
+        
+        return JSONResponse({
+            "choices": [{"message": {"role": "assistant", "content": reply}}],
+            "model": "zinaida-router",
+            "usage": {"total_tokens": 0}
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002)

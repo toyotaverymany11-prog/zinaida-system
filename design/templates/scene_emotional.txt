@@ -1,0 +1,53 @@
+# ═══════════════════════════════════════════════════════════
+# ШАБЛОН ПРОМПТА: ВАРИАНТ 3 — КИНО-СЦЕНА
+# Модель: black-forest-labs/flux-dev-lora + LoRA: Muapi/russian-text-flux
+# ═══════════════════════════════════════════════════════════
+# Использование: 15% контента
+# Формат: 1080x1350 (вертикаль)
+# ═══════════════════════════════════════════════════════════
+
+[ОСНОВНОЙ ПРОМПТ — АНГЛИЙСКИЙ]
+
+Cinematic photorealistic scene. {ОПИСАНИЕ_СЦЕНЫ}.
+{ОПИСАНИЕ_ПЕРСОНАЖА}. {ОСВЕЩЕНИЕ}.
+Color palette: warm amber, brown, golden tones.
+Shallow depth of field, bokeh background.
+Shot on 85mm lens, golden hour lighting.
+Style: documentary photography, NOT glossy or artificial.
+Film grain texture, cinematic color grading.
+Optional small text "{ПОДПИСЬ}" in top left corner, small white sans-serif.
+Vertical format 1080x1350.
+
+[ТИПЫ СЦЕН]
+1. ОДИНОЧЕСТВО:
+   "A man in his 30s sitting alone on the edge of a bed, back to camera,
+    dim warm evening light from window, contemplative mood"
+2. РАСКАЯНИЕ:
+   "A man in his 30s looking at his phone in a dark room, face lit by
+    phone screen glow, expression of regret, soft warm ambient light"
+3. РАЗРЫВ:
+   "A couple sitting back to back on a couch, emotional distance,
+    warm evening interior light, moody atmosphere"
+4. НЕЖНОСТЬ:
+   "A man's hand reaching out towards camera, warm golden light,
+    soft focus, intimate close-up, gentle mood"
+5. ТОКСИЧНОСТЬ:
+   "A man standing by a window, harsh shadows on face, arms crossed,
+    cold blue-grey light, controlling posture, tense atmosphere"
+
+[ПЕРСОНАЖИ]
+- Мужчина 30-40 лет: НЕ модельный, "обычный красивый"
+- Пара: спиной друг к другу, или рука тянется к руке
+- НИКОГДА не использовать Зинаиду в этих сценах
+
+[ПОДПИСЬ — опционально]
+1-2 слова мелко в углу: "ОН УШЁЛ", "ТИШИНА", "ОЖИДАНИЕ"
+Или вообще без текста (текст в caption поста)
+
+[ПРАВИЛА]
+- Стиль ВСЕГДА кинематографический, документальный
+- НИКАКОГО глянца, НИКАКОГО AI-look
+- Зерно плёнки, натуральные тона
+- Эмоция > красота
+- Тёплые тона (янтарь, коричневый, золотой)
+- Мягкое боке на фоне

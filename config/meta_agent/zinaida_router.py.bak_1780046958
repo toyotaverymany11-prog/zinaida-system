@@ -1,0 +1,156 @@
+import os, json, requests, time, sys, asyncio, uuid, logging
+from fastapi import FastAPI, Request, Header
+from fastapi.responses import JSONResponse, StreamingResponse
+
+logging.basicConfig(filename='/opt/zinaida/logs/zinaida_router.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+app = FastAPI()
+
+def load_env():
+    env_path = '/opt/zinaida/meta_agent/.env'
+    if not os.path.exists(env_path): return {}
+    env_vars = {}
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip().replace('\r', '')
+            if not line or line.startswith('#'): continue
+            if line.startswith('export '): line = line[7:].strip()
+            if '=' in line:
+                k, v = line.split('=', 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and v:
+                    env_vars[k] = v
+                    os.environ[k] = v
+    return env_vars
+
+ENV = load_env()
+PROVIDERS = []
+
+if ENV.get('ZHIPU_API_KEY'):
+    PROVIDERS.append({'name':'zhipu','url':'https://open.bigmodel.cn/api/paas/v4/chat/completions','model':'glm-4-flash','headers':{'Authorization':f'Bearer {ENV["ZHIPU_API_KEY"]}','Content-Type':'application/json'},'verify':True,'vision':False})
+if ENV.get('GITHUB_TOKEN'):
+    PROVIDERS.append({'name':'github','url':'https://models.inference.ai.azure.com/chat/completions','model':'gpt-4o-mini','headers':{'Authorization':f'Bearer {ENV["GITHUB_TOKEN"]}','Content-Type':'application/json'},'verify':True,'vision':True})
+
+or_key = ENV.get('OPENROUTER_API_KEY') or ENV.get('OPENROUTER_KEY')
+if or_key:
+    PROVIDERS.append({'name':'openrouter','url':'https://openrouter.ai/api/v1/chat/completions','model':'google/gemma-3-12b-it:free','headers':{'Authorization':f'Bearer {or_key}','Content-Type':'application/json','HTTP-Referer':'https://zinaida.local','X-Title':'Zinaida Router'},'verify':True,'vision':True})
+
+if ENV.get('MISTRAL_API_KEY'):
+    PROVIDERS.append({'name':'mistral','url':'https://api.mistral.ai/v1/chat/completions','model':'mistral-small-latest','headers':{'Authorization':f'Bearer {ENV["MISTRAL_API_KEY"]}','Content-Type':'application/json'},'verify':True,'vision':False})
+if ENV.get('GIGACHAT_TOKEN'):
+    PROVIDERS.append({'name':'gigachat','url':'https://gigachat.devices.sberbank.ru/api/v1/chat/completions','model':'GigaChat','headers':{'Authorization':f'Bearer {ENV["GIGACHAT_TOKEN"]}','Content-Type':'application/json'},'verify':False,'vision':False})
+
+PROVIDERS.append({'name':'ollama','url':'http://127.0.0.1:11434/v1/chat/completions','model':'gemma3:4b','headers':{'Content-Type':'application/json'},'verify':True,'vision':True})
+
+CORE_PATH = '/opt/zinaida/memory/knowledge/CORE.md'
+SNAPSHOT_PATH = '/root/workspace/SYSTEM_SNAPSHOT.md'
+NICHES_DIR = '/root/workspace/niches'
+
+def load_core():
+    try:
+        with open(CORE_PATH, 'r', encoding='utf-8') as f: return f.read()
+    except Exception as e:
+        logger.error(f'CORE load fail: {e}')
+        return 'Ты — Зинаида, руководитель маркетингового агентства. Говори в женском роде.'
+
+def load_niche_context(niche_id):
+    if not niche_id: return ''
+    niche_dir = os.path.join(NICHES_DIR, niche_id)
+    if not os.path.exists(niche_dir): return ''
+    ctx = ''
+    for fname, tag in [('brief.md', f'[КОНТЕКСТ НИШИ {niche_id}]'), ('tone.md', '[СТИЛЬ И ОГРАНИЧЕНИЯ]')]:
+        fpath = os.path.join(niche_dir, fname)
+        if os.path.exists(fpath):
+            with open(fpath, 'r', encoding='utf-8') as f: ctx += f'\n\n{tag}\n{f.read()}'
+    return ctx
+
+def extract_text_and_media(messages):
+    full_text = []
+    has_media = False
+    for msg in messages:
+        content = msg.get('content', '')
+        if isinstance(content, str):
+            full_text.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    ptype = part.get('type', '')
+                    if ptype == 'text':
+                        full_text.append(part.get('text', ''))
+                    elif ptype in ('image_url', 'file', 'image'):
+                        has_media = True
+    return ' '.join(full_text).strip(), has_media
+
+def build_system_prompt(user_text, niche_id=None):
+    core = load_core()
+    if user_text.strip().upper().startswith('[СИСТЕМА]'):
+        try:
+            with open(SNAPSHOT_PATH, 'r', encoding='utf-8') as f: snap = f.read()
+        except: snap = '[Слепок недоступен]'
+        return f'{core}\n\n[СИСТЕМНЫЙ РЕЖИМ]\n{snap}\n\nОтветь кратко, по делу.'
+    prompt = core
+    if niche_id: prompt += load_niche_context(niche_id)
+    return prompt
+
+def call_provider_sync(messages, system_prompt, provider):
+    payload_msgs = [{'role': 'system', 'content': system_prompt}] + messages
+    payload = {'model': provider['model'], 'messages': payload_msgs, 'temperature': 0.4, 'max_tokens': 1500}
+    try:
+        resp = requests.post(provider['url'], json=payload, headers=provider['headers'], timeout=25, verify=provider['verify'])
+        if resp.status_code == 200:
+            data = resp.json()
+            content = data.get('choices',[{}])[0].get('message',{}).get('content','')
+            if content:
+                logger.info(f'Provider {provider["name"]} OK')
+                return content
+        else:
+            logger.warning(f'Provider {provider["name"]} -> {resp.status_code}')
+    except Exception as e:
+        logger.error(f'Provider {provider["name"]} error: {e}')
+    return None
+
+def call_with_fallback(messages, system_prompt, force_vision=False):
+    targets = PROVIDERS
+    if force_vision:
+        targets = [p for p in PROVIDERS if p.get('vision')] + [p for p in PROVIDERS if not p.get('vision')]
+    for p in targets:
+        res = call_provider_sync(messages, system_prompt, p)
+        if res: return res
+    return '[ОШИБКА: Все провайдеры недоступны. Проверь ключи, сеть или Ollama.]'
+
+def stream_generator(messages, system_prompt, force_vision=False):
+    full = call_with_fallback(messages, system_prompt, force_vision)
+    cid = f'chatcmpl-{uuid.uuid4().hex[:8]}'
+    chunk = {'id':cid,'object':'chat.completion.chunk','created':int(time.time()),'model':'zinaida-router','choices':[{'index':0,'delta':{'content':full},'finish_reason':'stop'}]}
+    yield f'data: {json.dumps(chunk)}\n\n'
+    yield 'data: [DONE]\n\n'
+
+@app.get('/health')
+def health():
+    return {'status':'ok','router':'zinaida_fallback_v4_vision','providers':[p['name'] for p in PROVIDERS]}
+
+@app.post('/v1/chat/completions')
+async def chat(request: Request, x_niche_id: str = Header(None)):
+    try:
+        data = await request.json()
+        msgs = data.get('messages',[])
+        if not msgs:
+            return JSONResponse({'error':'messages required'}, status_code=400)
+        extracted_text, has_media = extract_text_and_media(msgs)
+        nid = data.get('niche_id') or x_niche_id
+        stream = data.get('stream', False)
+        if nid and not os.path.exists(os.path.join(NICHES_DIR, nid)):
+            return JSONResponse(status_code=404, content={'error':f'Niche {nid} not found'})
+        sys_prompt = build_system_prompt(extracted_text, nid)
+        if stream:
+            return StreamingResponse(stream_generator(msgs, sys_prompt, force_vision=has_media), media_type='text/event-stream')
+        reply = call_with_fallback(msgs, sys_prompt, force_vision=has_media)
+        return JSONResponse({'choices':[{'message':{'role':'assistant','content':reply}}],'model':'zinaida-router','usage':{'total_tokens':0}})
+    except Exception as e:
+        logger.error(f'Router error: {e}')
+        return JSONResponse({'error':str(e)}, status_code=500)
+
+if __name__ == '__main__':
+    import uvicorn
+    logger.info(f'Starting v4 with providers: {[p["name"] for p in PROVIDERS]}')
+    uvicorn.run(app, host='0.0.0.0', port=8002)

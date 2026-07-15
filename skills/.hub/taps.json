@@ -1,0 +1,8 @@
+{
+  "taps": [
+    {
+      "repo": "0xNyk/awesome-hermes-agent",
+      "path": "skills/"
+    }
+  ]
+}

@@ -1,0 +1,724 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+ ZINA2 ROUTER v2.0 — DeepSeek + Бесплатные усилители
+================================================================================
+Порт: 8005
+
+Архитектура:
+  1. Классификатор — Ollama для приветствий, Flash для всего, Pro для сложного
+  2. Server RAG — grep по файлам сервера по теме запроса
+  3. Mistral-анализатор — cross-связи между файлами
+  4. Генерация — DeepSeek Flash (основной) или Pro (сложный)
+  5. Graceful fallback — если DeepSeek упал, отвечаем через Mistral/Ollama
+
+Фишки:
+  - 3+ ключа Mistral с ротацией при 429
+  - 3+ ключа Ollama с ротацией
+  - Кэширование ответов (хеш запроса -> ответ, TTL 5 мин)
+  - Логирование в analytics.db
+  - Чувствительность Pro — только по смыслу, не по длине
+================================================================================
+"""
+
+import sys, os, json, time, uuid, logging, asyncio, warnings, copy, hashlib, sqlite3
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+import uvicorn
+import httpx
+
+warnings.filterwarnings("ignore")
+sys.path.insert(0, str(Path(__file__).parent))
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ZINA2v2] %(message)s")
+logger = logging.getLogger("zina2_router_v2")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+app = FastAPI(title="8005 Router v2.0")
+
+# ============================================================================
+# 1. КОНФИГУРАЦИЯ
+# ============================================================================
+ENV_PATH = Path("/opt/zinaida/.env")
+META_ENV_PATH = Path("/opt/zinaida/meta_agent/.env")
+
+def load_env():
+    for p in [ENV_PATH, META_ENV_PATH]:
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, _, v = line.partition("=")
+                        os.environ.setdefault(k.strip(), v.strip())
+load_env()
+
+DEEPSEEK_KEY = ""
+for p in [ENV_PATH, META_ENV_PATH]:
+    if p.exists():
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DEEPSEEK_API_KEY") and "=" in line:
+                    val = line.split("=", 1)[1].strip()
+                    if val and val != "***" and len(val) > 10:
+                        DEEPSEEK_KEY = val
+                        break
+        if DEEPSEEK_KEY:
+            break
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
+MISTRAL_KEYS = []
+for env_key in ["MISTRAL_API_KEY", "MISTRAL_API_KEY_2", "MISTRAL_API_KEY_3",
+                "MISTRAL_API_KEY_4", "MISTRAL_API_KEY_5"]:
+    val = os.getenv(env_key, "")
+    if val and val not in ("***", "") and len(val) > 10:
+        MISTRAL_KEYS.append(val)
+MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+
+OLLAMA_KEYS = []
+for env_key in ["OLLAMA_API_KEY", "OLLAMA_API_KEY_2", "OLLAMA_API_KEY_3",
+                "GREG_OLLAMA_KEY"]:
+    val = os.getenv(env_key, "")
+    if val and val not in ("***", "") and len(val) > 10:
+        OLLAMA_KEYS.append(val)
+OLLAMA_URL = "https://ollama.com/v1/chat/completions"
+
+PRO_CHAR_THRESHOLD  = int(os.getenv("ZINA2_PRO_CHAR", "300"))
+FLASH_TIMEOUT       = float(os.getenv("ZINA2_FLASH_TIMEOUT", "30.0"))
+PRO_TIMEOUT         = float(os.getenv("ZINA2_PRO_TIMEOUT", "120.0"))
+CONNECT_TIMEOUT     = float(os.getenv("ZINA2_CONNECT_TIMEOUT", "4.0"))
+CACHE_TTL           = int(os.getenv("ZINA2_CACHE_TTL", "300"))
+ANALYTICS_DB        = "/opt/zinaida/memory/analytics.db"
+
+_mistral_key_idx = 0
+_ollama_key_idx = 0
+_cache = {}
+
+# ============================================================================
+# 2. МОДЕЛИ
+# ============================================================================
+MODELS = {
+    "flash": {"id": "deepseek-chat", "name": "DeepSeek Flash", "cost_per_m": 0.27},
+    "pro": {"id": "deepseek-reasoner", "name": "DeepSeek Pro", "cost_per_m": 1.42},
+}
+
+ALLOWED_KEYS = {"model", "messages", "stream", "max_tokens", "temperature", "top_p",
+                "frequency_penalty", "presence_penalty", "stop", "user", "tools",
+                "tool_choice", "parallel_tool_calls", "response_format"}
+
+# ============================================================================
+# 3. КЛАССИФИКАЦИЯ
+# ============================================================================
+PRO_TRIGGER_WORDS = {
+    "анализируй", "проанализируй", "глубокий разбор", "разбери подробно",
+    "сравни", "сравнение", "сопоставь", "отличие", "разница",
+    "код", "скрипт", "python", "javascript", "function", "debug", "баг",
+    "алгоритм", "функция", "класс", "метод", "парсер",
+    "sql",
+    "стратегия", "стратегический", "план действий", "roadmap",
+    "архитектура", "проектирование", "спроектируй",
+    "объясни подробно", "расскажи детально", "разжую", "разложи по полочкам",
+}
+
+OLLAMA_WORDS = {"привет", "пока", "да", "нет", "ок", "окей", "здравствуй"}
+
+def _classify_request(messages: List[dict]) -> str:
+    if not messages:
+        return "flash"
+    last_user = None
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = (m.get("content") or "").strip()
+            break
+    if not last_user:
+        return "flash"
+    text_lower = last_user.lower().strip()
+    text_len = len(last_user)
+    words = text_lower.split()
+    if len(words) <= 2:
+        clean_words = [w.strip(".,!? ") for w in words]
+        if clean_words and all(w in OLLAMA_WORDS for w in clean_words):
+            logger.info("CLASSIFY: ollama (приветствие)")
+            return "ollama"
+    if len(words) >= 3:
+        for word in PRO_TRIGGER_WORDS:
+            if word in text_lower:
+                logger.info("CLASSIFY: pro (триггер: %s)", word)
+                return "pro"
+    if text_len > PRO_CHAR_THRESHOLD:
+        logger.info("CLASSIFY: pro (длина %d > %d)", text_len, PRO_CHAR_THRESHOLD)
+        return "pro"
+    latin_ratio = sum(1 for c in last_user if c.isascii() and c.isalpha()) / max(len(last_user), 1)
+    if latin_ratio > 0.4 and any(c in last_user for c in "{};:=[]"):
+        logger.info("CLASSIFY: pro (код: латиница %.0f%%)", latin_ratio * 100)
+        return "pro"
+    logger.info("CLASSIFY: flash (по умолчанию, %d символов)", text_len)
+    return "flash"
+
+# ============================================================================
+# 4. БЕСПЛАТНЫЕ УСИЛИТЕЛИ
+# ============================================================================
+
+# 4.1 Ротация ключей
+def _next_mistral_key() -> Optional[str]:
+    global _mistral_key_idx
+    if not MISTRAL_KEYS:
+        return None
+    key = MISTRAL_KEYS[_mistral_key_idx % len(MISTRAL_KEYS)]
+    _mistral_key_idx = (_mistral_key_idx + 1) % len(MISTRAL_KEYS)
+    return key
+
+def _next_ollama_key() -> Optional[str]:
+    global _ollama_key_idx
+    if not OLLAMA_KEYS:
+        return None
+    key = OLLAMA_KEYS[_ollama_key_idx % len(OLLAMA_KEYS)]
+    _ollama_key_idx = (_ollama_key_idx + 1) % len(OLLAMA_KEYS)
+    return key
+
+# 4.2 Server RAG — поиск по файлам сервера по теме запроса
+async def _search_rag(query: str) -> str:
+    """Ищет файлы на сервере по теме запроса (rg через subprocess).
+    Исключает: backup*, cache, sessions, node_modules, .git, __pycache__.
+    Возвращает 3 куска по 500 символов.
+    """
+    if not query or len(query) < 10:
+        return ""
+    try:
+        words = [w.strip(".,!?[]()\"' ") for w in query.lower().split()
+                 if len(w.strip(".,!?[]()\"' ")) > 3
+                 and w not in ("это", "что", "как", "для", "про", "или",
+                              "блядь", "блять", "если", "когда", "там",
+                              "тут", "свой", "очень", "нужно", "можно",
+                              "потом", "сейчас", "будет", "такой", "какие",
+                              "самый", "чтобы", "тебе", "меня", "твой",
+                              "наш", "кто", "куда", "откуда", "почему",
+                              "зачем", "пока", "опять", "ещё", "уже",
+                              "даже", "тоже", "всё", "все", "нет",
+                              "давай", "сделай", "посмотри")]
+        words = words[:5]
+        if not words:
+            return ""
+
+        search_pattern = "|".join(words)
+        search_root = "/opt/zinaida"
+
+        # Ищем ТОЛЬКО в ключевых папках: meta_agent, memory, shared_memory, scripts
+        # rg на всю /opt/zinaida тормозит из-за backup/* (сотни МБ)
+        search_dirs = [
+            "/opt/zinaida/meta_agent",
+            "/opt/zinaida/memory",
+            "/opt/zinaida/shared_memory",
+            "/opt/zinaida/scripts",
+        ]
+
+        cmd = [
+            "rg", "-i", "-l", "--no-heading", "-m", "1",
+            search_pattern,
+            # Ищем в файлах .md .py .yaml .json .toml
+            "-g", "*.md", "-g", "*.py", "-g", "*.yaml",
+            "-g", "*.yml", "-g", "*.json", "-g", "*.toml",
+        ] + search_dirs
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        paths = stdout.decode("utf-8", errors="replace").strip().split("\n")
+        paths = [p for p in paths if p.strip()][:5]
+
+        # Дополнительно ищем по имени файла — если имя содержит слово из запроса
+        name_cmd = [
+            "find"] + search_dirs + [
+            "-maxdepth", "3", "-type", "f",
+            "(", "-name", f"*{words[0]}*",
+        ]
+        for w in words[1:]:
+            name_cmd += ["-o", "-name", f"*{w}*"]
+        name_cmd += [")", "-not", "-name", "*.bak", "-not", "-name", "*.swp"]
+        name_cmd += ["-not", "-path", "*backup*", "-not", "-path", "*cache*"]
+
+        name_proc = await asyncio.create_subprocess_exec(
+            *name_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            name_stdout, _ = await asyncio.wait_for(name_proc.communicate(), timeout=2.0)
+            name_paths = name_stdout.decode("utf-8", errors="replace").strip().split("\n")
+            name_paths = [p for p in name_paths if p.strip()]
+            # Добавляем найденные по имени в начало (они релевантнее)
+            if name_paths:
+                paths = name_paths[:3] + paths
+                logger.info("RAG: +%d файлов по имени: %s", len(name_paths), [p.split("/")[-1] for p in name_paths[:3]])
+        except asyncio.TimeoutError:
+            pass
+        paths = paths[:5]
+
+        if not paths:
+            logger.info("RAG: ничего не найдено по '%s'", search_pattern[:60])
+            return ""
+
+        chunks = []
+        for p in paths:
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    lines = []
+                    total = 0
+                    for line in f:
+                        lines.append(line.rstrip())
+                        total += len(line)
+                        if total > 500 or len(lines) >= 8:
+                            break
+                    chunk = "\n".join(lines)[:500]
+                    if chunk:
+                        rel_path = p
+                        for prefix in search_dirs:
+                            if p.startswith(prefix + "/"):
+                                rel_path = p[len(prefix)+1:]
+                                break
+                        chunks.append(f"[{rel_path}]\n{chunk}")
+            except Exception:
+                pass
+
+        if chunks:
+            logger.info("RAG: найдено %d файлов", len(chunks))
+            return "\n\n---\n\n".join(chunks)
+    except asyncio.TimeoutError:
+        logger.warning("RAG: timeout (3s)")
+    except Exception as e:
+        logger.warning("RAG fail: %s", e)
+    return ""
+
+# 4.3 Mistral-анализатор — ищет cross-связи между найденными файлами
+async def _analyze_context(query: str, rag_chunks: str) -> str:
+    """Mistral анализирует найденные куски: ищет связи, конфликты, релевантность."""
+    if not MISTRAL_KEYS or not rag_chunks or len(rag_chunks) < 50:
+        return ""
+    key = _next_mistral_key()
+    prompt = f"""Проанализируй найденные файлы по запросу пользователя.
+Найди только РЕАЛЬНЫЕ связи (файл А ссылается на файл Б, один конфиг переопределяет другой, и т.д.).
+Ничего не выдумывай. Если связей нет — ответь: Нет связей.
+
+Запрос: {query[:300]}
+
+Файлы:
+{rag_chunks[:1500]}
+
+Формат (только если есть связи):
+🔗 Связь: [файл] -> [файл] — описание
+"""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(4.0, connect=3.0)) as c:
+            resp = await c.post(
+                MISTRAL_URL,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": "mistral-small-latest", "messages": [
+                    {"role": "user", "content": prompt}
+                ], "max_tokens": 300, "temperature": 0.1}
+            )
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                if content and "Нет связей" not in content:
+                    logger.info("ANALYZE: найдены связи: %s", content[:100])
+                    return content
+                logger.info("ANALYZE: связей нет" if content else "ANALYZE: пустой ответ")
+    except asyncio.TimeoutError:
+        logger.warning("ANALYZE: timeout (4s)")
+    except Exception as e:
+        logger.warning("ANALYZE fail: %s", e)
+    return ""
+
+# 4.4 Fallback — если DeepSeek упал, отвечаем через Mistral/Ollama
+async def _fallback_generate(messages: List[dict]) -> dict:
+    last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = (m.get("content") or "").strip()
+            break
+    if MISTRAL_KEYS:
+        key = _next_mistral_key()
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(30, connect=5)) as c:
+                resp = await c.post(
+                    MISTRAL_URL,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": "mistral-small-latest", "messages": messages,
+                          "max_tokens": 1024, "temperature": 0.7}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    logger.info("FALLBACK: Mistral ответил")
+                    return data
+        except Exception as e:
+            logger.warning("FALLBACK Mistral fail: %s", e)
+    if OLLAMA_KEYS:
+        key = _next_ollama_key()
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(30, connect=5)) as c:
+                resp = await c.post(
+                    OLLAMA_URL,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": "gemma3:4b", "messages": messages,
+                          "max_tokens": 512, "temperature": 0.7}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    logger.info("FALLBACK: Ollama ответил")
+                    return data
+        except Exception as e:
+            logger.warning("FALLBACK Ollama fail: %s", e)
+    logger.error("FALLBACK: ВСЕ ПРОВАЙДЕРЫ МЁРТВЫ")
+    return _build_response("Извини, сейчас проблемы с нейросетями. Попробуй через минуту.", "fallback")
+
+# ============================================================================
+# 5. ВЫЗОВ DeepSeek
+# ============================================================================
+async def _call_deepseek(model_id: str, payload: dict, timeout: float) -> dict:
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_KEY}",
+        "Content-Type": "application/json",
+    }
+    work = copy.deepcopy(payload)
+    work["model"] = model_id
+    async with httpx.AsyncClient(verify=False,
+            timeout=httpx.Timeout(timeout, read=timeout, connect=CONNECT_TIMEOUT)) as client:
+        resp = await client.post(DEEPSEEK_URL, headers=headers, json=work)
+        if resp.status_code >= 400:
+            err_text = resp.text[:300]
+            logger.warning("DeepSeek HTTP %d: %s", resp.status_code, err_text)
+        resp.raise_for_status()
+        return resp.json()
+
+async def _call_deepseek_stream(model_id: str, payload: dict, timeout: float):
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_KEY}",
+        "Content-Type": "application/json",
+    }
+    work = copy.deepcopy(payload)
+    work["model"] = model_id
+    work["stream"] = True
+    client = httpx.AsyncClient(verify=False,
+            timeout=httpx.Timeout(timeout, read=timeout, connect=CONNECT_TIMEOUT))
+    try:
+        resp = await client.send(
+            client.build_request("POST", DEEPSEEK_URL, headers=headers, json=work),
+            stream=True)
+        if resp.status_code >= 400:
+            err_text = await resp.aread()
+            await resp.aclose()
+            await client.aclose()
+            raise Exception(f"HTTP {resp.status_code}: {err_text.decode()[:200]}")
+        return client, resp
+    except Exception:
+        await client.aclose()
+        raise
+
+# ============================================================================
+# 6. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================================
+def _build_response(text: str, model_key: str, model_name: str = "") -> dict:
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_name or f"8005-{model_key}",
+        "choices": [{"index": 0,
+                     "message": {"role": "assistant", "content": text},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+def sanitize_payload(payload: dict) -> dict:
+    return {k: v for k, v in payload.items() if k in ALLOWED_KEYS}
+
+def _cache_key(messages: list) -> str:
+    return hashlib.md5(json.dumps(messages, sort_keys=True).encode()).hexdigest()
+
+def _cache_get(key: str) -> Optional[dict]:
+    if key in _cache:
+        resp, expiry = _cache[key]
+        if time.time() < expiry:
+            return resp
+        del _cache[key]
+    return None
+
+def _cache_set(key: str, response: dict):
+    _cache[key] = (response, time.time() + CACHE_TTL)
+
+async def _log_request(model_used: str, char_count: int, elapsed: float, status: str):
+    try:
+        conn = sqlite3.connect(ANALYTICS_DB)
+        conn.execute("""
+            INSERT INTO requests (timestamp, model, chars, elapsed, status)
+            VALUES (?, ?, ?, ?, ?)
+        """, (datetime.now().isoformat(), model_used, char_count, elapsed, status))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# ============================================================================
+# 7. ОСНОВНОЙ ПАЙПЛАЙН
+# ============================================================================
+async def _generate(messages: List[dict], is_stream: bool, timeout: float,
+                    requested_model: str = "") -> dict:
+    start = time.time()
+
+    # --- Шаг 1: Классификация ---
+    if requested_model:
+        req = requested_model.lower()
+        if "pro" in req or "reasoner" in req:
+            model_key = "pro"
+        elif "v3" in req:
+            model_key = "pro"
+        elif "ollama" in req:
+            model_key = "ollama"
+        elif "flash" in req:
+            model_key = "flash"
+        else:
+            model_key = _classify_request(messages)
+    else:
+        model_key = _classify_request(messages)
+
+    logger.info("PIPELINE: классификация = %s", model_key)
+
+    # --- Шаг 2: Если Ollama — простой ответ через Ollama (бесплатно) ---
+    if model_key == "ollama" and OLLAMA_KEYS:
+        last_user = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                last_user = (m.get("content") or "").strip()
+                break
+        key = _next_ollama_key()
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(10, connect=5)) as c:
+                resp = await c.post(
+                    OLLAMA_URL,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": "gemma3:4b", "messages": messages, "max_tokens": 50, "temperature": 0.5}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    text = data["choices"][0]["message"]["content"]
+                    logger.info("OLLAMA OK: ответил за %.1f сек", time.time() - start)
+                    await _log_request("ollama/gemma3:4b", len(last_user), time.time() - start, "ok")
+                    return _build_response(text, "ollama")
+        except Exception as e:
+            logger.warning("OLLAMA fail, fallback к DeepSeek Flash: %s", e)
+        model_key = "flash"
+
+    # --- Извлекаем запрос пользователя ---
+    last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = (m.get("content") or "").strip()
+            break
+
+    # --- Шаг 3: Server RAG сначала (быстро, не параллельно — чтобы один вызов DeepSeek) ---
+    rag_context = ""
+    if last_user and len(last_user) > 5 and model_key != "ollama":
+        rag_chunks = await _search_rag(last_user)
+        if rag_chunks:
+            logger.info("RAG: получено %d символов", len(rag_chunks))
+            # Mistral-анализатор параллельно — не блокирует DeepSeek
+            analyze_task = asyncio.create_task(_analyze_context(last_user, rag_chunks))
+            rag_context = f"\n\n[КОНТЕКСТ С СЕРВЕРА]\n{rag_chunks}\n[/КОНТЕКСТ]"
+        else:
+            analyze_task = None
+            logger.info("RAG: ничего не найдено")
+    else:
+        rag_chunks = ""
+        analyze_task = None
+        logger.info("RAG: пропущен (короткий запрос или ollama)")
+
+    # --- Шаг 4: ОДИН вызов DeepSeek с контекстом (если есть) ---
+    model_id = MODELS.get(model_key, MODELS["flash"])["id"]
+    ds_payload = sanitize_payload({"messages": messages, "max_tokens": 4096, "temperature": 0.7})
+
+    if rag_context:
+        # Добавляем контекст прямо в последнее сообщение пользователя
+        enriched = copy.deepcopy(ds_payload)
+        for m in reversed(enriched["messages"]):
+            if m.get("role") == "user":
+                m["content"] = f"{m['content']}\n\n---\nВот информация с сервера по теме:\n{rag_context}\n\nИспользуй её в ответе — ответь точнее и полезнее. Не упоминай что получил контекст."
+                break
+        ds_payload = enriched
+        logger.info("DEEPSEEK: контекст добавлен (%d символов), один вызов", len(rag_context))
+
+    try:
+        ds_timeout = PRO_TIMEOUT if model_key == "pro" else FLASH_TIMEOUT
+        logger.info("CALL DS: model=%s, timeout=%s", model_id, ds_timeout)
+        result = await _call_deepseek(model_id, ds_payload, ds_timeout)
+        response_text = result["choices"][0]["message"]["content"]
+        logger.info("DEEPSEEK (%s) OK: %d символов за %.1f сек",
+                    model_key, len(response_text), time.time() - start)
+
+        # Забираем Mistral-анализатор (ещё бежит — ждём макс 3 сек)
+        if rag_context and analyze_task:
+            try:
+                analyze_result = await asyncio.wait_for(analyze_task, timeout=3.0)
+                if analyze_result:
+                    logger.info("ANALYZE: %s", analyze_result[:100])
+            except asyncio.TimeoutError:
+                logger.warning("ANALYZE: timeout")
+
+        # --- Шаг 5: Фикс рода (для Зинаиды) ---
+        _male_to_female = [
+            (" понял ", " поняла "), (" сделал ", " сделала "), (" пошел ", " пошла "),
+            (" пошёл ", " пошла "), (" написал ", " написала "), (" сказал ", " сказала "),
+            (" проверил ", " проверила "), (" запустил ", " запустила "),
+            (" поправил ", " поправила "), (" начал ", " начала "),
+            (" думал ", " думала "), (" ответил ", " ответила "),
+            (" решил ", " решила "), (" зашел ", " зашла "), (" зашёл ", " зашла "),
+            (" вышел ", " вышла "), (" пришел ", " пришла "), (" пришёл ", " пришла "),
+            (" ушел ", " ушла "), (" ушёл ", " ушла "), (" увидел ", " увидела "),
+            (" услышал ", " услышала "), (" открыл ", " открыла "),
+            (" закрыл ", " закрыла "), (" взял ", " взяла "),
+            (" дал ", " дала "), (" нашёл ", " нашла "), (" нашел ", " нашла "),
+            (" встал ", " встала "), (" сел ", " села "),
+            (" лег ", " легла "), (" лёг ", " легла "),
+        ]
+        for male, female in _male_to_female:
+            if male in response_text.lower():
+                idx = response_text.lower().find(male)
+                if idx >= 0:
+                    before = response_text[:idx]
+                    after = response_text[idx+len(male):]
+                    response_text = before + female + after
+
+        elapsed = time.time() - start
+        await _log_request(f"deepseek/{model_key}", len(last_user), elapsed, "ok")
+        return _build_response(response_text, model_key, f"8005-{model_key}")
+
+    except Exception as e:
+        logger.warning("DEEPSEEK %s fail: %s — fallback к бесплатным", model_key, e)
+        elapsed = time.time() - start
+        await _log_request(f"deepseek/{model_key}", len(last_user), elapsed, f"fail:{str(e)[:50]}")
+        fallback_result = await _fallback_generate(messages)
+        return fallback_result
+
+
+# ============================================================================
+# 8. HTTP-ЭНДПОИНТЫ
+# ============================================================================
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        is_stream = data.get("stream", False)
+        timeout = float(data.get("timeout", PRO_TIMEOUT))
+        messages = data.get("messages", [])
+        requested_model = data.get("model", "")
+
+        cache_key = _cache_key(messages)
+        cached = _cache_get(cache_key)
+        if cached:
+            logger.info("CACHE HIT: возвращаю кэшированный ответ")
+            cached["created"] = int(time.time())
+            return JSONResponse(cached)
+
+        if is_stream:
+            model_key = _classify_request(messages) if not requested_model else "flash"
+            if "pro" in requested_model.lower() or "reasoner" in requested_model.lower():
+                model_key = "pro"
+            model_id = MODELS.get(model_key, MODELS["flash"])["id"]
+            payload = sanitize_payload(data)
+            try:
+                client, resp = await _call_deepseek_stream(model_id, payload, timeout)
+                async def stream_gen(r, c):
+                    try:
+                        async for chunk in r.aiter_lines():
+                            if chunk:
+                                yield f"{chunk}\n\n"
+                    finally:
+                        await r.aclose()
+                        await c.aclose()
+                return StreamingResponse(stream_gen(resp, client), media_type="text/event-stream")
+            except Exception as e:
+                logger.warning("STREAM FAIL: %s — fallback", e)
+                async def fb_gen():
+                    fb = _build_response("Сервис временно недоступен. Попробуй через минуту.", "fallback")
+                    payload_chunk = {
+                        "id": fb["id"], "object": "chat.completion.chunk",
+                        "created": fb["created"], "model": "8005-Fallback",
+                        "choices": [{"index": 0, "delta": {"role": "assistant",
+                                                           "content": "Сервис временно недоступен. Попробуй через минуту."},
+                                     "finish_reason": None}]}
+                    yield f"data: {json.dumps(payload_chunk, ensure_ascii=False)}\n\n"
+                    payload_chunk["choices"][0]["delta"] = {}
+                    payload_chunk["choices"][0]["finish_reason"] = "stop"
+                    yield f"data: {json.dumps(payload_chunk, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(fb_gen(), media_type="text/event-stream")
+
+        result = await _generate(messages, False, timeout, requested_model)
+        _cache_set(cache_key, result)
+        return JSONResponse(result)
+
+    except Exception as e:
+        logger.error("CRASH: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {"id": "8005-Router", "object": "model", "owned_by": "local"},
+            {"id": "8005-Flash", "object": "model", "owned_by": "local"},
+            {"id": "8005-Pro", "object": "model", "owned_by": "local"},
+        ]
+    }
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "port": 8005,
+        "version": "2.0",
+        "deepseek": bool(DEEPSEEK_KEY),
+        "deepseek_key_preview": DEEPSEEK_KEY[:10] + "..." if DEEPSEEK_KEY else "none",
+        "mistral_keys": len(MISTRAL_KEYS),
+        "ollama_keys": len(OLLAMA_KEYS),
+    }
+
+@app.get("/status")
+async def status():
+    return {
+        "router": "8005 Router v2.0",
+        "deepseek_key_loaded": bool(DEEPSEEK_KEY),
+        "mistral_keys_loaded": len(MISTRAL_KEYS),
+        "ollama_keys_loaded": len(OLLAMA_KEYS),
+        "pro_char_threshold": PRO_CHAR_THRESHOLD,
+        "cache_entries": len(_cache),
+        "models": {k: v["id"] for k, v in MODELS.items()},
+        "classify": {
+            "ollama": "приветствия и односложные (бесплатно)",
+            "flash": "все обычные запросы (по умолчанию)",
+            "pro": "только сложные/анализ/код >300 символов",
+        },
+        "amplifiers": {
+            "server_rag": "rg поиск по файлам сервера по теме (бесплатно)",
+            "analyze": "Mistral ищет cross-связи между файлами (бесплатно)",
+            "fallback": "Mistral -> Ollama если DeepSeek упал",
+        }
+    }
+
+# ============================================================================
+# 9. СТАРТ
+# ============================================================================
+if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("ZINA2 ROUTER v2.0 стартует на :8005")
+    logger.info("  DeepSeek:   %s", "ключ загружен" if DEEPSEEK_KEY else "НЕТ КЛЮЧА!")
+    logger.info("  Mistral:    %d ключей", len(MISTRAL_KEYS))
+    logger.info("  Ollama:     %d ключей", len(OLLAMA_KEYS))
+    logger.info("  Server RAG: вкл (rg по /opt/zinaida/)")
+    logger.info("  Анализатор: вкл (Mistral cross-связи)")
+    logger.info("  Pro порог:  %d символов", PRO_CHAR_THRESHOLD)
+    logger.info("  Кэш TTL:    %d сек", CACHE_TTL)
+    logger.info("=" * 60)
+    uvicorn.run(app, host="127.0.0.1", port=8005, log_level="info", log_config=None)

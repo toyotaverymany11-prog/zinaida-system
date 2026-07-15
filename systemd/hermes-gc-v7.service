@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes GC Agent v7 — @Ольга @Зинаида
+After=network.target hermes-web-ui.service
+Requires=hermes-web-ui.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /opt/zinaida/scripts/gc_agent_v7.py
+WorkingDirectory=/opt/zinaida/scripts
+Restart=always
+RestartSec=10
+User=root
+StandardOutput=append:/var/log/gc-agent-v7.log
+StandardError=append:/var/log/gc-agent-v7.log
+
+[Install]
+WantedBy=multi-user.target

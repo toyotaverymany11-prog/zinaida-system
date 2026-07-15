@@ -1,0 +1,90 @@
+import os, json, time, logging, uuid, requests
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Optional
+
+app = FastAPI(title="Zinaida Router v1.1 (KeySync)")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ZINAIDA] %(message)s")
+log = logging.getLogger(__name__)
+
+KEYS_FILE = "/opt/zinaida/sandbox/configs/api_keys.json"
+CORE_MD_PATH = "/opt/zinaida/memory/knowledge/CORE.md"
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[Message]
+    model: Optional[str] = None
+    stream: Optional[bool] = False
+    max_tokens: Optional[int] = 1024
+    temperature: Optional[float] = 0.7
+
+# ИСПРАВЛЕНО: key_name точно совпадает с api_keys.json
+PROVIDERS = [
+    {"name": "openrouter_llama70b", "url": "https://openrouter.ai/api/v1/chat/completions", "model": "meta-llama/llama-3.3-70b-instruct:free", "key_name": "openrouter_qwen25_coder_free", "headers_extra": {"HTTP-Referer": "https://zinaida.local", "X-Title": "Zinaida"}},
+    {"name": "openrouter_qwq", "url": "https://openrouter.ai/api/v1/chat/completions", "model": "qwen/qwq-32b:free", "key_name": "openrouter_qwen25_coder_free", "headers_extra": {"HTTP-Referer": "https://zinaida.local", "X-Title": "Zinaida"}},
+    {"name": "zhipu", "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions", "model": "glm-4-flash", "key_name": "zhipu_glm4_flash", "headers_extra": {}}
+]
+
+def find_key(data, target):
+    if isinstance(data, dict):
+        if target in data: return data[target]
+        for v in data.values():
+            res = find_key(v, target)
+            if res: return res
+    return None
+
+def load_key(key_name):
+    try:
+        with open(KEYS_FILE, "r", encoding="utf-8") as f: data = json.load(f)
+        return find_key(data, key_name)
+    except Exception as e:
+        log.error(f"Keys load error: {e}"); return None
+
+def load_core_md():
+    try:
+        if os.path.isfile(CORE_MD_PATH):
+            with open(CORE_MD_PATH, "r", encoding="utf-8") as f: return f.read().strip()
+    except: pass
+    return "Ты — Зинаида, стратег и аудитор. Отвечай чётко, на русском языке."
+
+def call_provider(provider, messages, timeout=(5, 25)):
+    api_key = load_key(provider["key_name"])
+    if not api_key: raise ValueError(f"No key for {provider['name']}")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", **provider["headers_extra"]}
+    # ИСПРАВЛЕНО: Pydantic V2 совместимость
+    payload = {"model": provider["model"], "messages": [m.model_dump() if hasattr(m, "model_dump") else m for m in messages], "max_tokens": 1024, "temperature": 0.7, "stream": False}
+    resp = requests.post(provider["url"], headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content or "System Error" in content or "502" in content: raise ValueError("Invalid/empty content or infrastructure error")
+    return content
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatRequest):
+    trace_id = str(uuid.uuid4())[:8]
+    start = time.time()
+    core_prompt = load_core_md()
+    if req.messages and req.messages[0].role != "system": req.messages.insert(0, Message(role="system", content=core_prompt))
+    log.info(f"[{trace_id}] Incoming request")
+    for prov in PROVIDERS:
+        try:
+            log.info(f"[{trace_id}] Trying {prov['name']}...")
+            result = call_provider(prov, req.messages)
+            latency = round(time.time() - start, 2)
+            log.info(f"[{trace_id}] Success via {prov['name']} in {latency}s")
+            return JSONResponse({"id": f"chatcmpl-{trace_id}", "object": "chat.completion", "created": int(time.time()), "model": prov["model"], "choices": [{"index": 0, "message": {"role": "assistant", "content": result}, "finish_reason": "stop"}]})
+        except Exception as e:
+            log.warning(f"[{trace_id}] {prov['name']} failed: {e}"); continue
+    return JSONResponse({"id": f"chatcmpl-{trace_id}", "object": "chat.completion", "created": int(time.time()), "model": "router-fallback", "choices": [{"index": 0, "message": {"role": "assistant", "content": "⛔ Зинаида: Все провайдеры недоступны."}, "finish_reason": "stop"}]}, status_code=503)
+
+@app.get("/health")
+def health(): return {"status": "ok", "ts": time.time()}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002, log_level="info")

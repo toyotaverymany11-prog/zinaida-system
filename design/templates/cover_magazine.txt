@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════════
+# ШАБЛОН ПРОМПТА: ВАРИАНТ 1 — ЖУРНАЛЬНАЯ ОБЛОЖКА
+# Модель: recraft-ai/recraft-v3
+# ═══════════════════════════════════════════════════════════
+# Использование: 60% контента
+# Формат: 1080x1080 (пост) или 1080x1350 (карусель)
+# ═══════════════════════════════════════════════════════════
+
+[ОСНОВНОЙ ПРОМПТ — АНГЛИЙСКИЙ]
+
+A premium magazine cover design for social media post.
+Large bold text "{ЗАГОЛОВОК}" in elegant high-contrast Didone serif font,
+white color, thin serifs, bold vertical strokes, taking 70% of the image area.
+Background: darkened photo of a confident elegant woman with dark hair
+and auburn tips, wearing a white shirt, looking at camera with slight smile.
+The woman is semi-transparent, serving as background texture (30% opacity).
+Dark gradient overlay from top. Color palette: black, white text,
+bordeaux (#8B0000) subtle accent. Style: luxury fashion magazine cover,
+Vogue aesthetic. Professional typography. Clean minimalist layout.
+Square format 1080x1080.
+
+[ПЕРЕМЕННЫЕ]
+{ЗАГОЛОВОК} — 2-4 слова ЗАГЛАВНЫМИ БУКВАМИ на русском
+  Примеры: "ОН МОЛЧИТ", "ПОЧЕМУ ОН УШЁЛ", "ЕГО СТРАХ",
+  "ПОЧЕМУ ОН НЕ ПИШЕТ", "ОН БОИТСЯ ЛЮБВИ", "ТЫ ЕМУ НУЖНА"
+
+[ПРАВИЛА]
+- Текст ВСЕГДА в кавычках в промпте
+- Текст ВСЕГДА ЗАГЛАВНЫМИ
+- Максимум 4 слова (кириллица работает лучше с короткими фразами)
+- Лицо женщины — фон, НЕ главный элемент
+- Главный элемент = ТЕКСТ
+- При необходимости добавить подзаголовок мелким sans-serif внизу
+
+[ВАРИАЦИИ]
+- С золотым акцентом: заменить white text на gold (#C9A84C)
+- С бежевым фоном: warm beige (#F5E6D0) background, dark brown text
+- Вертикальный: изменить на 1080x1350
+
+[ПРИМЕР ГОТОВОГО ПРОМПТА]
+A premium magazine cover design. Large bold text "ОН МОЛЧИТ" in elegant
+Didone serif font, white color, high contrast strokes, occupying 70% of
+the image. Background: darkened silhouette of a confident woman, 30% opacity,
+dark gradient overlay. Bordeaux accent line at bottom. Luxury editorial style.
+Small sans-serif subtitle "мужская психология" at the bottom. 1080x1080.

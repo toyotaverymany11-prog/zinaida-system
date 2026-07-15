@@ -1,0 +1,176 @@
+import os, json, requests, time, sys, uuid
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from typing import List, Dict, Any
+
+sys.path.insert(0, '/opt/zinaida/meta_agent')
+from provider_manager import get_provider, request_complexity_score
+from routing_logger import log_routing_event
+from project_context import load_project_context
+
+app = FastAPI()
+
+CORE_PATH = '/opt/zinaida/memory/knowledge/CORE.md'
+_core_cache = {'mtime': 0, 'content': ''}
+
+def load_core():
+    global _core_cache
+    try:
+        mtime = os.path.getmtime(CORE_PATH)
+        if mtime != _core_cache['mtime']:
+            with open(CORE_PATH, 'r', encoding='utf-8') as f:
+                _core_cache['content'] = f.read()
+            _core_cache['mtime'] = mtime
+        return _core_cache['content']
+    except Exception as e:
+        print(f"ERR: CORE load fail: {e}")
+        return _core_cache['content'] or "Ты — Зинаида, инженер-архитектор. Говори коротко, по делу."
+
+def load_env():
+    env_path = '/opt/zinaida/meta_agent/.env'
+    if not os.path.exists(env_path): return {}
+    env_vars = {}
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip().replace('\r', '')
+            if not line or line.startswith('#'): continue
+            if line.startswith('export '): line = line[7:].strip()
+            key, sep, value = line.partition('=')
+            if sep:
+                env_vars[key.strip()] = value.strip().strip('"').strip("'")
+    return env_vars
+
+ENV = load_env()
+
+LEGACY_PROVIDERS = []
+if ENV.get('ZHIPU_API_KEY'):
+    LEGACY_PROVIDERS.append({'name': 'zhipu', 'url': 'https://open.bigmodel.cn/api/paas/v4/chat/completions', 'model': 'glm-4-flash', 'headers': {'Authorization': f"Bearer {ENV['ZHIPU_API_KEY']}", 'Content-Type': 'application/json'}, 'verify': True})
+if ENV.get('GITHUB_TOKEN'):
+    LEGACY_PROVIDERS.append({'name': 'github', 'url': 'https://models.inference.ai.azure.com/chat/completions', 'model': 'gpt-4o-mini', 'headers': {'Authorization': f"Bearer {ENV['GITHUB_TOKEN']}", 'Content-Type': 'application/json'}, 'vision': True, 'verify': True})
+or_key = ENV.get('OPENROUTER_API_KEY') or ENV.get('OPENROUTER_KEY')
+if or_key:
+    LEGACY_PROVIDERS.append({'name': 'openrouter', 'url': 'https://openrouter.ai/api/v1/chat/completions', 'model': 'google/gemma-3-12b-it:free', 'headers': {'Authorization': f"Bearer {or_key}", 'Content-Type': 'application/json', 'HTTP-Referer': 'http://localhost:8787', 'X-Title': 'Hermes-Zinaida'}, 'vision': True, 'verify': True})
+if ENV.get('OLLAMA_MODEL'):
+    LEGACY_PROVIDERS.append({'name': 'ollama', 'url': 'http://127.0.0.1:11434/v1/chat/completions', 'model': ENV.get('OLLAMA_MODEL', 'gemma3:4b'), 'headers': {'Content-Type': 'application/json'}, 'vision': True, 'verify': True})
+
+def extract_text_and_media(messages: List[Dict[str, Any]]) -> tuple:
+    full_text = []
+    has_media = False
+    for msg in messages:
+        content = msg.get('content', '')
+        if isinstance(content, str):
+            full_text.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    ptype = part.get('type', '')
+                    if ptype == 'text':
+                        full_text.append(part.get('text', ''))
+                    elif ptype in ('image_url', 'file', 'image'):
+                        has_media = True
+    return ' '.join(full_text).strip(), has_media
+
+def build_system_prompt(user_text: str) -> str:
+    core = load_core()
+    proj_ctx = load_project_context(user_text)
+    prompt = f"{core}\n\n[КОНТЕКСТ ПРОЕКТА]\n{proj_ctx}\n\n[ЗАПРОС ПОЛЬЗОВАТЕЛЯ]"
+    if user_text.strip().upper().startswith('[СИСТЕМА]'):
+        try:
+            with open('/opt/zinaida/memory/SYSTEM_SNAPSHOT.md', 'r', encoding='utf-8') as f:
+                snap = f.read()
+        except Exception:
+            snap = '[Слепок недоступен]'
+        prompt += f"\n\n[СИСТЕМНЫЙ РЕЖИМ]\n{snap}\n\nОтветь кратко."
+    return prompt
+
+def call_provider_sync(messages: List[Dict], system_prompt: str, provider: Dict) -> str:
+    headers = provider.get('headers', {})
+    payload = {
+        'model': provider['model'],
+        'messages': [{'role': 'system', 'content': system_prompt}] + messages,
+        'temperature': 0.7
+    }
+    try:
+        resp = requests.post(provider['url'], json=payload, headers=headers, timeout=25, verify=provider.get('verify', True))
+        if resp.status_code == 200:
+            data = resp.json()
+            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            if content:
+                print(f"PROVIDER {provider.get('name', provider['model'])} OK")
+                return content
+        else:
+            print(f"PROVIDER {provider.get('name', provider['model'])} -> {resp.status_code}: {resp.text[:100]}")
+    except Exception as e:
+        print(f"PROVIDER {provider.get('name', provider['model'])} ERROR: {e}")
+    return None
+
+def call_with_smart_routing(messages: List[Dict], system_prompt: str, force_vision: bool = False) -> str:
+    text, _ = extract_text_and_media(messages)
+    ctx_size = len(text)
+    complexity = request_complexity_score(ctx_size, text)
+    strategy = "analyze" if (force_vision or complexity > 0.7) else "filter"
+    
+    provider = get_provider(strategy, ctx_size, text)
+    start_time = time.time()
+    used_provider = "none"
+    
+    if provider:
+        try:
+            res = call_provider_sync(messages, system_prompt, provider)
+            if res:
+                used_provider = provider.get('name', provider.get('model', 'unknown'))
+                latency = int((time.time() - start_time) * 1000)
+                log_routing_event({"strategy": strategy, "provider": used_provider, "latency_ms": latency, "status": "ok", "context_size": ctx_size, "complexity_score": complexity})
+                return res
+        except Exception as e:
+            print(f"SMART ROUTING ERROR: {e}")
+            
+    print("SMART ROUTING FALLBACK TO LEGACY")
+    targets = LEGACY_PROVIDERS
+    if force_vision:
+        targets = [p for p in LEGACY_PROVIDERS if p.get('vision')] + [p for p in LEGACY_PROVIDERS if not p.get('vision')]
+    for p in targets:
+        res = call_provider_sync(messages, system_prompt, p)
+        if res:
+            used_provider = p['name']
+            latency = int((time.time() - start_time) * 1000)
+            log_routing_event({"strategy": strategy, "provider": used_provider, "latency_ms": latency, "status": "fallback_ok", "context_size": ctx_size, "complexity_score": complexity})
+            return res
+            
+    latency = int((time.time() - start_time) * 1000)
+    log_routing_event({"strategy": strategy, "provider": "none", "latency_ms": latency, "status": "all_failed", "context_size": ctx_size, "complexity_score": complexity})
+    return "[ОШИБКА: Все провайдеры недоступны. Проверь ключи или сеть.]"
+
+def stream_generator(messages: List[Dict], system_prompt: str, force_vision: bool = False):
+    full = call_with_smart_routing(messages, system_prompt, force_vision)
+    cid = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    chunk = {'id': cid, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': 'fallback', 'choices': [{'index': 0, 'delta': {'content': full}, 'finish_reason': 'stop'}]}
+    yield f"data: {json.dumps(chunk)}\n\n"
+    yield "data: [DONE]\n\n"
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "router": "zinaida_v5.7_rag_v2", "providers": ["smart_manager"] + [p['name'] for p in LEGACY_PROVIDERS]}
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        messages = data.get('messages', [])
+        if not messages:
+            return JSONResponse(status_code=400, content={"error": "messages required"})
+        extracted_text, has_media = extract_text_and_media(messages)
+        stream = data.get('stream', False)
+        sys_prompt = build_system_prompt(extracted_text)
+        if stream:
+            return StreamingResponse(stream_generator(messages, sys_prompt, force_vision=has_media), media_type="text/event-stream")
+        reply = call_with_smart_routing(messages, sys_prompt, force_vision=has_media)
+        return {"choices": [{"message": {"role": "assistant", "content": reply}}]}
+    except Exception as e:
+        print(f"ROUTER ERROR: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+if __name__ == "__main__":
+    import uvicorn
+    print(f"STARTING V5.7 RAG v2 WITH PROVIDERS: {[p['name'] for p in LEGACY_PROVIDERS]}")
+    uvicorn.run(app, host="0.0.0.0", port=8002)

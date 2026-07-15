@@ -1,0 +1,47 @@
+{
+  "timestamp": "2026-07-08 15:36:50",
+  "reference_files": [
+    "/opt/zinaida/inbox/Контент/111/IMG_0413.PNG",
+    "/opt/zinaida/inbox/Контент/111/IMG_0415.PNG",
+    "/opt/zinaida/inbox/Контент/111/IMG_9391.JPG"
+  ],
+  "total_generated": 6,
+  "results": {
+    "dramatic": {
+      "path": "/opt/zinaida/design/passport/generated/dramatic.jpg",
+      "size_bytes": 327840,
+      "model": "black-forest-labs/flux-1.1-pro",
+      "url": "https://replicate.delivery/xezq/gyJm1hqvSVo4HNKcsngCtxjVLeS5LoklUdXUop0CVO1eeDutA/tmp1_ph2ysz.jpg"
+    },
+    "front_serious": {
+      "path": "/opt/zinaida/design/passport/generated/front_serious.jpg",
+      "size_bytes": 284066,
+      "model": "black-forest-labs/flux-1.1-pro",
+      "url": "https://replicate.delivery/xezq/7dovm8aDpxryDtAfCruoYLtHigQfqYhqYDVhe46eatP73HcbB/tmp4lx4dhuw.jpg"
+    },
+    "front_smile": {
+      "path": "/opt/zinaida/design/passport/generated/front_smile.jpg",
+      "size_bytes": 278292,
+      "model": "black-forest-labs/flux-1.1-pro",
+      "url": "https://replicate.delivery/xezq/Tpe1QjmHvNRLFKDyVxHSqxmXeqB34yH2C2bAurs1MGlOeDutA/tmp9acfvq5c.jpg"
+    },
+    "profile_left": {
+      "path": "/opt/zinaida/design/passport/generated/profile_left.jpg",
+      "size_bytes": 302699,
+      "model": "black-forest-labs/flux-1.1-pro",
+      "url": "https://replicate.delivery/xezq/tW6szGASV3aVK1nnJSRmZHOkkconCCfEYecIvRHx8DVe8DutA/tmpmcvxxd2j.jpg"
+    },
+    "profile_right": {
+      "path": "/opt/zinaida/design/passport/generated/profile_right.jpg",
+      "size_bytes": 310231,
+      "model": "black-forest-labs/flux-1.1-pro",
+      "url": "https://replicate.delivery/xezq/N7nCmleoBnXkKSocaDEzF1jxOhnIyG07c4Q91wJcr0RmfB3WA/tmp6lky0h0m.jpg"
+    },
+    "three_quarter": {
+      "path": "/opt/zinaida/design/passport/generated/three_quarter.jpg",
+      "size_bytes": 313476,
+      "model": "black-forest-labs/flux-1.1-pro",
+      "url": "https://replicate.delivery/xezq/xKw6PnoZp0KBGpM3tOCruiasEaLbR8JIDEBCZUPPvYRrfgbLA/tmpn4_4_4za.jpg"
+    }
+  }
+}

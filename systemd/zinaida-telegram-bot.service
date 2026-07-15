@@ -1,0 +1,16 @@
+[Unit]
+Description=Zinaida Telegram Bot (@DCHP_Shtab_bot)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/telegram_bot
+EnvironmentFile=/root/.hermes/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/zinaida/telegram_bot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Hermes Web UI v0.6.28
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hermes-web-ui --port 8648 --host 0.0.0.0
+WorkingDirectory=/usr/lib/node_modules/hermes-web-ui
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=append:/var/log/hermes-web-ui.log
+StandardError=append:/var/log/hermes-web-ui.log
+
+[Install]
+WantedBy=multi-user.target

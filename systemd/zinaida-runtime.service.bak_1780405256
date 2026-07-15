@@ -1,0 +1,17 @@
+[Unit]
+Description=Zinaida Unified Agent Runtime
+After=network.target zinaida-core.service zinaida-gateway.service zinaida-memory.service
+Wants=zinaida-core.service zinaida-gateway.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+ExecStart=/usr/bin/python3 /opt/zinaida/meta_agent/agent_runtime.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

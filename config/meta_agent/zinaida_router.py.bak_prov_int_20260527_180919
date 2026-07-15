@@ -1,0 +1,114 @@
+from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+import os, json, requests, time, sys, uuid
+
+app = FastAPI()
+
+# === КОНФИГУРАЦИЯ ===
+CORE_PATH = "/opt/zinaida/memory/knowledge/CORE.md"
+NICHES_DIR = "/root/workspace/niches"
+
+# Ключи (замените на свои, если они не в .env)
+# Для безопасности лучше брать из os.environ, но для надежности пропишем дефолты, если они есть
+ZHIPU_KEY = os.environ.get("ZHIPU_API_KEY", "your_zhipu_key_here") 
+GITHUB_KEY = os.environ.get("GITHUB_TOKEN", "your_github_token_here")
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "your_openrouter_key_here")
+
+# === ЛОГИКА LLM ===
+def call_llm(messages):
+    # 1. Пробуем Zhipu (glm-4-flash)
+    try:
+        headers = {"Authorization": f"Bearer {ZHIPU_KEY}", "Content-Type": "application/json"}
+        payload = {"model": "glm-4-flash", "messages": messages, "temperature": 0.7}
+        resp = requests.post("https://open.bigmodel.cn/api/paas/v4/chat/completions", headers=headers, json=payload, timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        print(f"Zhipu Error: {e}")
+
+    # 2. Пробуем GitHub Models (gpt-4.1-mini)
+    try:
+        headers = {"Authorization": f"Bearer {GITHUB_KEY}", "Content-Type": "application/json"}
+        payload = {"model": "gpt-4.1-mini", "messages": messages, "temperature": 0.7}
+        resp = requests.post("https://models.inference.ai.azure.com/chat/completions", headers=headers, json=payload, timeout=20)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        print(f"GitHub Error: {e}")
+
+    # 3. Пробуем OpenRouter (laguna-m.1:free)
+    try:
+        headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "HTTP-Referer": "http://localhost", "Content-Type": "application/json"}
+        payload = {"model": "poolside/laguna-m.1:free", "messages": messages, "temperature": 0.7}
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        print(f"OpenRouter Error: {e}")
+
+    return {"error": "All providers failed"}
+
+# === ЭНДПОИНТ ===
+@app.post("/v1/chat/completions")
+async def chat(request: Request, x_niche_id: str = Header(None)):
+    # 1. Валидация ниши
+    if not x_niche_id:
+        return JSONResponse(status_code=400, content={"error": "X-Niche-ID header required"})
+    
+    niche_path = f"{NICHES_DIR}/{x_niche_id}"
+    if not os.path.exists(niche_path):
+        return JSONResponse(status_code=404, content={"error": f"Niche '{x_niche_id}' not found in {NICHES_DIR}"})
+
+    # 2. Загрузка контекста (Физическая изоляция)
+    try:
+        brief = open(f"{niche_path}/brief.md", "r", encoding="utf-8").read() if os.path.exists(f"{niche_path}/brief.md") else "Нет описания."
+        tone = open(f"{niche_path}/tone.md", "r", encoding="utf-8").read() if os.path.exists(f"{niche_path}/tone.md") else "Нет стиля."
+        
+        # Список файлов в raw_files
+        raw_dir = f"{niche_path}/raw_files"
+        files_list = os.listdir(raw_dir) if os.path.exists(raw_dir) else []
+        files_str = ", ".join(files_list) if files_list else "Нет файлов"
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Failed to load niche context: {e}"})
+
+    # 3. Загрузка Ядра (Личность Зинаиды)
+    try:
+        core = open(CORE_PATH, "r", encoding="utf-8").read() if os.path.exists(CORE_PATH) else "Ты — Зинаида, инженер-архитектор."
+    except:
+        core = "Ты — Зинаида."
+
+    # 4. Сборка промпта
+    system_prompt = f"""{core}
+
+=== КОНТЕКСТ НИШИ: {x_niche_id} ===
+[BRIEF]: {brief}
+[TONE]: {tone}
+[FILES]: Доступные файлы: {files_str}
+
+ПРАВИЛО: Отвечай строго в рамках этой ниши. Не используй факты из других проектов.
+"""
+
+    data = await request.json()
+    messages = data.get("messages", [])
+    
+    # Инжект системного промпта в начало
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = system_prompt + "\n" + messages[0].get("content", "")
+    else:
+        messages.insert(0, {"role": "system", "content": system_prompt})
+
+    # 5. Вызов LLM
+    result = call_llm(messages)
+    
+    if "error" in result:
+        return JSONResponse(status_code=502, content=result)
+        
+    return result
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "router": "niche_isolation_v1"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002)

@@ -1,0 +1,16 @@
+[Unit]
+Description=Zinaida Core Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+ExecStart=/usr/bin/python3 /opt/zinaida/meta_agent/zinaida_openai_proxy.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

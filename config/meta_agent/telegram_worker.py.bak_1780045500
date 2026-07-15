@@ -1,0 +1,57 @@
+import os, requests, base64, logging, telebot
+from telebot import types
+
+logging.basicConfig(
+    filename='/opt/zinaida/logs/telegram_worker.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+TOKEN = os.getenv('TELEGRAM_TOKEN', '8560310319:AAFFS5ubSS0FQI8xowTl9TCg3UrOw6J3pIk')
+ROUTER_URL = "http://127.0.0.1:8002/v1/chat/completions"
+bot = telebot.TeleBot(TOKEN)
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, 'Привет! Я Зинаида. Отправь текст или фото для анализа.')
+
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
+    try:
+        payload = {"messages": [{"role": "user", "content": message.text}], "stream": False}
+        resp = requests.post(ROUTER_URL, json=payload, timeout=30)
+        resp.raise_for_status()
+        reply = resp.json().get('choices', [{}])[0].get('message', {}).get('content', 'Нет ответа')
+        bot.reply_to(message, reply)
+    except Exception as e:
+        logger.error(f'Text error: {e}')
+        bot.reply_to(message, 'Ошибка при обработке текста.')
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    try:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        b64 = base64.b64encode(downloaded).decode('utf-8')
+        payload = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Проанализируй это изображение"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]
+            }],
+            "stream": False
+        }
+        resp = requests.post(ROUTER_URL, json=payload, timeout=60)
+        resp.raise_for_status()
+        reply = resp.json().get('choices', [{}])[0].get('message', {}).get('content', 'Нет ответа')
+        bot.reply_to(message, reply)
+    except Exception as e:
+        logger.error(f'Photo error: {e}')
+        bot.reply_to(message, 'Ошибка при анализе изображения.')
+
+if __name__ == '__main__':
+    logger.info('Telegram worker starting...')
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)

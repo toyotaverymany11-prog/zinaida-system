@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+import requests, json, logging, os, time
+from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [GATEWAY] %(message)s")
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Zinaida Memory Gateway")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+CORE_URL = "http://localhost:8000/v1/chat/completions"
+MEMORY_URL = "http://localhost:8505"
+TASK_MASTER_PATH = "/opt/zinaida/dashboard/TASK_MASTER.md"
+KB_PATH = "/opt/zinaida/sandbox/knowledge/provider_knowledge_base.md"
+
+SYSTEM_INSTRUCTION = """🌐 ЯЗЫК: СТРОГО РУССКИЙ. Любой ответ на другом языке считается ошибкой. Код, JSON, URL, технические идентификаторы → без перевода.
+🤖 ПРОТОКОЛ: Вы единый контур. При сбое → диагностируйте, чините в песочнице, отчитывайтесь. НИКОГДА не молчите.
+📦 ЗАДАЧИ: В конце ответа СТРОГО одна строка JSON: {"task_id": <число>, "status": "<executing|done|stuck>", "result": "<итог>"}
+⛔ ЗАПРЕЩЕНО: markdown-обёртки для JSON, пустые блоки, текст после JSON.
+"""
+
+def build_context():
+    parts = []
+    # === ТРИАДА HERMES (SOUL/MEMORY/USER) ===
+    triad_files = [
+        ("/opt/zinaida/memory/SOUL.md", "🧬 ДУША", 800),
+        ("/opt/zinaida/memory/MEMORY.md", "🧠 ПАМЯТЬ", 800),
+        ("/opt/zinaida/memory/USER.md", "👤 ПОЛЬЗОВАТЕЛЬ", 400),
+    ]
+    for fpath, label, limit in triad_files:
+        try:
+            if os.path.exists(fpath):
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()[:limit]
+                if content.strip():
+                    parts.append(f"{label}:\n{content}")
+        except: pass
+    # === СУЩЕСТВУЮЩИЕ ИСТОЧНИКИ ===
+    try:
+        if os.path.exists(TASK_MASTER_PATH):
+            with open(TASK_MASTER_PATH, "r", encoding="utf-8") as f: parts.append(f"📖 TASK_MASTER:\n{f.read()[:800]}")
+    except: pass
+    try:
+        if os.path.exists(KB_PATH):
+            with open(KB_PATH, "r", encoding="utf-8") as f: parts.append(f"📚 KNOWLEDGE:\n{f.read()[:800]}")
+    except: pass
+    try:
+        tasks = []
+        for st in ["planning","executing","stuck"]:
+            r = requests.get(f"{MEMORY_URL}/memory/tasks?status={st}", timeout=3)
+            if r.status_code == 200: tasks.extend(r.json().get("tasks", []))
+        if tasks:
+            lines = [f"- [{t['status'].upper()}] ID:{t['id']} | {t['title']}" for t in tasks[:4]]
+            parts.append(f"📌 ЗАДАЧИ:\n" + "\n".join(lines))
+    except: pass
+    # === ОБЩИЙ ЛИМИТ 2500 СИМВОЛОВ ===
+    full = ("📋 КОНТЕКСТ:\n" + "\n\n".join(parts) + "\n\n") if parts else ""
+    return full[:2500] if len(full) > 2500 else full
+
+def safe_parse(text: str) -> str:
+    if not text: return text
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith('{') and s.endswith('}'):
+            try:
+                cmd = json.loads(s)
+                if isinstance(cmd, dict) and "task_id" in cmd and "status" in cmd:
+                    try:
+                        requests.put(f"{MEMORY_URL}/memory/task/{cmd['task_id']}", json={"status": cmd["status"], "result": cmd.get("result","")}, timeout=4)
+                        logger.info(f"✅ TASK {cmd['task_id']} → {cmd['status']}")
+                    except: pass
+                    continue
+            except: pass
+        cleaned.append(line)
+    res = '\n'.join(cleaned).strip()
+    return res if res else text
+
+def ingest(role: str, content: str):
+    try: requests.post(f"{MEMORY_URL}/memory/ingest", json={"role": role, "content": content[:2000]}, timeout=3)
+    except: pass
+
+def make_resp(content: str, model="gateway"):
+    return {"id":"gw","object":"chat.completion","created":int(time.time()),"model":model,"choices":[{"index":0,"message":{"role":"assistant","content":content},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request, background_tasks: BackgroundTasks):
+    try:
+        data = await request.json()
+        msgs = data.get("messages", [])
+        if not msgs: return JSONResponse({"error":"No messages"}, status_code=400)
+        data["stream"] = False
+        ctx = build_context()
+        sys_text = SYSTEM_INSTRUCTION + ("\n\n" + ctx if ctx else "")
+        has_sys = any(m.get("role")=="system" for m in msgs)
+        if has_sys:
+            for m in msgs:
+                if m.get("role")=="system": m["content"] = f"{sys_text}\n\n{m.get('content','')}"
+        else:
+            msgs.insert(0, {"role":"system", "content": sys_text})
+        try:
+            # УМНАЯ МАРШРУТИЗАЦИЯ ПО ПОЛЮ AGENT
+            agent = data.get("agent", "").lower()
+            if agent == "zinaida":
+                target_url = "http://localhost:8002/v1/chat/completions"
+            elif agent == "grigoriy":
+                target_url = "http://localhost:8003/v1/chat/completions"
+            else:
+                target_url = CORE_URL  # Fallback на 8000
+            r = requests.post(target_url, json={**data, "messages": msgs}, timeout=120)
+            if r.status_code != 200: return JSONResponse(make_resp("⚠️ System Error 502: Ядро не ответило."))
+        except requests.exceptions.Timeout:
+            return JSONResponse(make_resp("⏳ System Timeout: Агенты обрабатывают запрос."))
+        except Exception as e:
+            return JSONResponse(make_resp(f"⚠️ System Error: {str(e)[:80]}"))
+        core_data = r.json()
+        raw = core_data.get("choices",[{}])[0].get("message",{}).get("content","")
+        cleaned = safe_parse(raw)
+        core_data["choices"][0]["message"]["content"] = cleaned
+        background_tasks.add_task(ingest, "user", msgs[-1].get("content",""))
+        background_tasks.add_task(ingest, "assistant", cleaned)
+        return JSONResponse(core_data)
+    except Exception as e:
+        logger.error(f"Gateway fatal: {e}")
+        return JSONResponse(make_resp(f"⚠️ Gateway Fatal: {str(e)[:80]}"))
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8001)

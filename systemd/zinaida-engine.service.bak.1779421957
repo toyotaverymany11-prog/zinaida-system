@@ -1,0 +1,21 @@
+[Unit]
+Description=Zinaida Autonomy Engine (Self-Healing v2)
+After=network.target zinaida-gateway.service
+Wants=zinaida-gateway.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+ExecStartPre=/usr/bin/python3 -c "import json,os; f='/opt/zinaida/sandbox/configs/autonomy_state.json'; d={}; exec('try:\n d=json.load(open(f))\nexcept: pass'); d['errors_streak']=0; json.dump(d, open(f,'w'), indent=2)"
+ExecStart=/usr/bin/python3 -u /opt/zinaida/meta_agent/autonomy_engine_v3.py
+ExecStartPost=/bin/bash -c 'systemctl show -p MainPID zinaida-engine.service | cut -d= -f2 > /opt/zinaida/logs/autonomy_engine_v3.pid'
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/zinaida/logs/autonomy_engine_v3.log
+StandardError=append:/opt/zinaida/logs/autonomy_engine_v3.log
+
+[Install]
+WantedBy=multi-user.target

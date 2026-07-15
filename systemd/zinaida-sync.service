@@ -1,0 +1,8 @@
+[Unit]
+Description=Zinaida OneDrive two-way sync (rclone bisync)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/zinaida/sync_onedrive.sh

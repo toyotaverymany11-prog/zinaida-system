@@ -1,0 +1,17 @@
+[Unit]
+Description=Zina2 Router — DeepSeek Flash/Pro/V3 (Port 8003)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+ExecStart=/usr/bin/python3 /opt/zinaida/meta_agent/zina2_router.py
+Restart=on-failure
+RestartSec=5
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

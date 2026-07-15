@@ -1,0 +1,32 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import os, json
+from provider_router import route_request
+
+app = FastAPI()
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    # Личность Григория (не читаем CORE.md Зинаиды)
+    core = "Ты — Григорий, технический эксперт. Специализация: код, отладка, серверная инфраструктура."
+
+    data = await request.json()
+    messages = data.get("messages", [])
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = f"{core}\n\n{messages[0].get('content', '')}"
+    else:
+        messages.insert(0, {"role": "system", "content": core})
+
+    result = route_request(messages, task_type="code")
+
+    if "error" in result and result.get("choices") == []:
+        return JSONResponse(status_code=502, content=result)
+    return result
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "router": "grigoriy_via_shared_provider_v1"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8003, log_level="info")

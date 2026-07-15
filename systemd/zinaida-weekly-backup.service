@@ -1,0 +1,14 @@
+[Unit]
+Description=Weekly Zinaida content factory backup
+RequiresMountsFor=/opt/zinaida
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/zinaida/scripts/weekly_backup.sh
+User=root
+Nice=19
+IOSchedulingClass=idle
+ExecStartPre=/usr/bin/bash -c 'if [ -f /tmp/zinaida-backup.lock ]; then echo "[LOCK] Предыдущий бэкап ещё выполняется" >> /var/log/zinaida-backup.log; exit 75; fi; touch /tmp/zinaida-backup.lock'
+ExecStartPost=/usr/bin/rm -f /tmp/zinaida-backup.lock

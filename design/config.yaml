@@ -1,0 +1,115 @@
+api:
+  env_file: /opt/zinaida/config/secrets.env
+  replicate_token_env: REPLICATE_API_TOKEN
+brand:
+  colors:
+    accent_bordeaux: '#8B0000'
+    dark_brown: '#5C1A1A'
+    deep_blue: '#1B2A4A'
+    gold: '#C9A84C'
+    primary: '#1A1A1A'
+    warm_beige: '#F5E6D0'
+  fonts:
+    body: Inter / Montserrat
+    heading: Didone / Modern Serif (референс «Его страх»)
+    prompt_description: elegant high-contrast serif font, Didone style, white text,
+      thin serifs, bold vertical strokes
+    quote_italic: Didone / Modern Serif Italic
+  logo_style: маленький ♦ или текстовый «З»
+  name: Зинаида
+  niche: Мужская психология / Отношения
+  target_audience: Женщины 18-40
+  tone: уверенный, экспертный, провокационный, тёплый
+budget:
+  generations_per_post: 3
+  max_per_week_usd: 2.0
+  startup_bonus_usd: 5.0
+characters:
+  male_types:
+  - lighting: контрастное, холодное
+    look: уверенный, в костюме, серьёзный взгляд
+    type: Альфа
+  - lighting: мягкое, тёплое
+    look: домашняя одежда, задумчивый, у окна
+    type: Ранимый
+  - lighting: тёмное, драматичное
+    look: тёмный свет, резкие тени, отворачивается
+    type: Токсичный
+  - lighting: golden hour, боке
+    look: мягкий свет, тянет руку, тёплые тона
+    type: Любящий
+  zinaida:
+    appearance: тёмные волосы с рыжими кончиками, белая рубашка, AR-очки
+    never: НЕ ставить в драматические сцены с мужчиной
+    role: Эксперт, автор, лицо бренда
+    usage: Только Вариант 1 — затемнённый фон
+content_mix:
+  variant_1_magazine: 0.6
+  variant_2_quote: 0.25
+  variant_3_scene: 0.15
+emotions_priority:
+- emotion: Задумчивость
+  percent: 50
+- emotion: Раскаяние / сожаление
+  percent: 20
+- emotion: Одиночество
+  percent: 15
+- emotion: Нежность
+  percent: 10
+- emotion: Агрессия/контроль
+  percent: 5
+formats:
+  carousel_vertical: 1080x1350
+  post_square: 1080x1080
+  story_vertical: 1080x1920
+models:
+  backup:
+    id: ideogram-ai/ideogram-v3-turbo
+    name: Ideogram v3 Turbo
+    notes: 90-95% точность кириллицы, дешевле Recraft
+    price_per_image: 0.03
+    use_for: Запасной вариант для текста
+  drafts:
+    id: black-forest-labs/flux-schnell
+    name: FLUX Schnell
+    notes: Самый дешёвый, текст не умеет
+    price_per_image: 0.003
+    use_for: Черновики и быстрые тесты
+  photorealistic:
+    id: black-forest-labs/flux-dev
+    name: FLUX dev
+    notes: Фотореализм + LoRA лица toyotaverymany11-prog/zina
+    price_per_image: 0.025
+    use_for: Вариант 3 (кино-сцена с персонажами) + портреты Зинаиды
+  text_main:
+    id: recraft-ai/recraft-v3
+    name: Recraft V3
+    notes: Лучшая кириллица. Контроль шрифтов.
+    price_per_image: 0.04
+    use_for: Вариант 1 (журнальная обложка) и Вариант 2 (цитата)
+  text_alternative:
+    id: bytedance/seedream-5-lite
+    name: Seedream 5.0 Lite
+    notes: Отличная кириллица, текст в двойных кавычках. До 14 референсов для лица.
+    price_per_image: 0.035
+    use_for: Альтернатива для текста + 2K разрешение
+  text_backup:
+    id: ideogram-ai/ideogram-v3-turbo
+    name: Ideogram v3 Turbo
+    notes: Бесплатная модель, 90-95% кириллица
+    price_per_image: 0.03
+    use_for: Запасной для текста
+  inpainting:
+    id: black-forest-labs/flux-1-fill-dev
+    name: FLUX Fill
+    notes: Интеграция текста в изображение через inpainting (дорисовывает свет/тени)
+    price_per_image: 0.025
+    use_for: Доработка текста на портрете (гибридный подход)
+paths:
+  approved: /opt/zinaida/design/approved
+  design_root: /opt/zinaida/design
+  generated: /opt/zinaida/design/generated
+  passport: /opt/zinaida/design/passport
+  photos_zinaida: /opt/zinaida/design/references/zinaida_face
+  references: /opt/zinaida/design/references
+  templates: /opt/zinaida/design/templates

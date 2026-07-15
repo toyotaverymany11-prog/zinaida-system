@@ -1,0 +1,124 @@
+{
+  "subject": "Зинаида",
+  "total": 20,
+  "ok": 5,
+  "failed": 0,
+  "reference_photos": [
+    "/opt/zinaida/design/passport/originals/photo1.png",
+    "/opt/zinaida/design/passport/originals/photo2.png",
+    "/opt/zinaida/design/passport/originals/photo3.jpg"
+  ],
+  "angles": [
+    {
+      "index": 1,
+      "name": "front_serious",
+      "filename": "passport_01_front_serious.png",
+      "prompt": "Professional portrait photo of young woman 28yo, dark hair, Slavic features from Sochi Russia. Ultra-realistic skin with visible pores, natural imperfections, subsurface scattering. Shot Canon EOS R5 85mm f1.4. 8K photorealistic. front view, looking directly at camera, serious expression",
+      "path": "/opt/zinaida/design/passport/generated/front_serious.png"
+    },
+    {
+      "index": 2,
+      "name": "front_smile",
+      "filename": "passport_02_front_smile.png",
+      "prompt": "Professional portrait photo of young woman 28yo, dark hair, Slavic features from Sochi Russia. Ultra-realistic skin with visible pores, natural imperfections, subsurface scattering. Shot Canon EOS R5 85mm f1.4. 8K photorealistic. front view, warm genuine smile",
+      "path": "/opt/zinaida/design/passport/generated/front_smile.png"
+    },
+    {
+      "index": 3,
+      "name": "left_profile",
+      "filename": "passport_03_left_profile.png",
+      "prompt": "Professional portrait photo of young woman 28yo, dark hair, Slavic features from Sochi Russia. Ultra-realistic skin with visible pores, natural imperfections, subsurface scattering. Shot Canon EOS R5 85mm f1.4. 8K photorealistic. left profile view, 90 degree side",
+      "path": "/opt/zinaida/design/passport/generated/left_profile.png"
+    },
+    {
+      "index": 4,
+      "name": "three_quarter_left",
+      "filename": "passport_04_three_quarter_left.png",
+      "prompt": "Professional portrait photo of young woman 28yo, dark hair, Slavic features from Sochi Russia. Ultra-realistic skin with visible pores, natural imperfections, subsurface scattering. Shot Canon EOS R5 85mm f1.4. 8K photorealistic. three quarter view from left, serious",
+      "path": "/opt/zinaida/design/passport/generated/three_quarter_left.png"
+    },
+    {
+      "index": 5,
+      "name": "dramatic_lighting",
+      "filename": "passport_05_dramatic_lighting.png",
+      "prompt": "Professional portrait photo of young woman 28yo, dark hair, Slavic features from Sochi Russia. Ultra-realistic skin with visible pores, natural imperfections, subsurface scattering. Shot Canon EOS R5 85mm f1.4. 8K photorealistic. dramatic side lighting, half face illuminated",
+      "path": "/opt/zinaida/design/passport/generated/dramatic_lighting.png"
+    },
+    {
+      "index": 6,
+      "name": "front_thoughtful",
+      "status": "pending"
+    },
+    {
+      "index": 7,
+      "name": "right_profile",
+      "status": "pending"
+    },
+    {
+      "index": 8,
+      "name": "three_quarter_right_serious",
+      "status": "pending"
+    },
+    {
+      "index": 9,
+      "name": "three_quarter_left_smile",
+      "status": "pending"
+    },
+    {
+      "index": 10,
+      "name": "three_quarter_right_smile",
+      "status": "pending"
+    },
+    {
+      "index": 11,
+      "name": "three_quarter_left_thoughtful",
+      "status": "pending"
+    },
+    {
+      "index": 12,
+      "name": "slight_left_intense",
+      "status": "pending"
+    },
+    {
+      "index": 13,
+      "name": "slight_right_soft",
+      "status": "pending"
+    },
+    {
+      "index": 14,
+      "name": "chin_up_confident",
+      "status": "pending"
+    },
+    {
+      "index": 15,
+      "name": "chin_down_mysterious",
+      "status": "pending"
+    },
+    {
+      "index": 16,
+      "name": "over_shoulder_left",
+      "status": "pending"
+    },
+    {
+      "index": 17,
+      "name": "over_shoulder_right",
+      "status": "pending"
+    },
+    {
+      "index": 18,
+      "name": "laughing",
+      "status": "pending"
+    },
+    {
+      "index": 19,
+      "name": "contemplative_window",
+      "status": "pending"
+    },
+    {
+      "index": 20,
+      "name": "close_up_eyes",
+      "status": "pending"
+    }
+  ],
+  "pending": 15
+}

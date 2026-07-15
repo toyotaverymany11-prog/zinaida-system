@@ -1,0 +1,138 @@
+"""Zinaida Router v4 — Full Rewrite. Stable CB, explicit timeouts, zero partial patches."""
+import os, json, time, uuid, requests, urllib3
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Optional
+import logging
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging.basicConfig(filename="/opt/zinaida/logs/zinaida_router.log", level=logging.INFO,
+                    format="%(asctime)s [ZINAIDA] %(message)s")
+log = logging.getLogger("zinaida")
+
+KEYS_FILE = "/opt/zinaida/sandbox/configs/api_keys.json"
+CONN_TIMEOUT = 5
+READ_TIMEOUT = 45
+CB_COOLDOWN = 300
+CB_MAX_FAILS = 2
+
+app = FastAPI()
+cb_state = {}
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    model: str
+    messages: List[Message]
+    max_tokens: Optional[int] = 1024
+    temperature: Optional[float] = 0.7
+
+def load_key(name: str) -> str:
+    try:
+        with open(KEYS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f).get("zinaida_keys", {}).get(name, "")
+    except Exception:
+        return ""
+
+PROVIDERS = [
+    {"name": "mistral", "url": "https://api.mistral.ai/v1/chat/completions", "model": "mistral-large-latest", "key": "mistral_large", "headers": {}},
+    {"name": "zhipu", "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions", "model": "glm-4-flash", "key": "zhipu_glm4_flash", "headers": {}},
+    {"name": "github", "url": "https://models.inference.ai.azure.com/chat/completions", "model": "gpt-4.1", "key": "github_gpt41", "headers": {}},
+    {"name": "gigachat", "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions", "model": "GigaChat", "key": "gigachat_auth", "headers": {}, "oauth": True},
+    {"name": "or_deepseek", "url": "https://openrouter.ai/api/v1/chat/completions", "model": "deepseek/deepseek-r1-0528:free", "key": "openrouter_qwen25_coder_free", "headers": {"HTTP-Referer": "https://zinaida.app", "X-Title": "Zinaida"}},
+]
+
+def is_healthy(name: str) -> bool:
+    if name not in cb_state:
+        return True
+    state = cb_state[name]
+    if time.time() - state["last_fail"] > CB_COOLDOWN:
+        del cb_state[name]
+        return True
+    return state["fails"] < CB_MAX_FAILS
+
+def mark_fail(name: str):
+    now = time.time()
+    if name not in cb_state:
+        cb_state[name] = {"fails": 0, "last_fail": now}
+    cb_state[name]["fails"] += 1
+    cb_state[name]["last_fail"] = now
+
+def mark_success(name: str):
+    if name in cb_state:
+        del cb_state[name]
+
+def get_gigachat_token() -> Optional[str]:
+    try:
+        auth = load_key("gigachat_auth")
+        scope = load_key("gigachat_scope")
+        uid = load_key("gigachat_uuid") or str(uuid.uuid4())
+        if not auth or not scope:
+            return None
+        r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+            headers={"Authorization": f"Basic {auth}", "RqUID": uid, "Content-Type": "application/x-www-form-urlencoded"},
+            data={"scope": scope}, verify=False, timeout=10)
+        return r.json().get("access_token") if r.status_code == 200 else None
+    except Exception:
+        return None
+
+def call_provider(p: dict, msgs: list) -> str:
+    key = get_gigachat_token() if p.get("oauth") else load_key(p["key"])
+    if not key:
+        raise ValueError("Missing key")
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", **p["headers"]}
+    payload = {
+        "model": p["model"],
+        "messages": [m.model_dump() if hasattr(m, "model_dump") else m.dict() for m in msgs],
+        "max_tokens": 1024,
+        "temperature": 0.7,
+        "stream": False
+    }
+    r = requests.post(p["url"], headers=headers, json=payload, timeout=(CONN_TIMEOUT, READ_TIMEOUT), verify=not p.get("oauth"))
+    r.raise_for_status()
+    content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        raise ValueError("Empty content")
+    return content
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatRequest):
+    tid = str(uuid.uuid4())[:8]
+    t0 = time.time()
+    if req.messages and req.messages[0].role != "system":
+        req.messages.insert(0, Message(role="system", content="Ты — Зинаида, стратег и архитектор. Рассуждай глубоко."))
+    log.info(f"[{tid}] Request")
+    
+    for p in PROVIDERS:
+        if not is_healthy(p["name"]):
+            log.info(f"[{tid}] Skip {p['name']} (CB)")
+            continue
+        try:
+            log.info(f"[{tid}] Try {p['name']}")
+            res = call_provider(p, req.messages)
+            log.info(f"[{tid}] OK {p['name']} ({round(time.time()-t0,2)}s)")
+            mark_success(p["name"])
+            return JSONResponse({
+                "id": f"chatcmpl-{tid}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": p["model"],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": res}, "finish_reason": "stop"}]
+            })
+        except Exception as e:
+            log.warning(f"[{tid}] {p['name']} fail: {str(e)[:120]}")
+            mark_fail(p["name"])
+            
+    log.error(f"[{tid}] All providers failed")
+    return JSONResponse(status_code=503, content={"error": {"message": "All providers failed", "code": 503}})
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "agent": "zinaida", "ts": time.time()}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002, log_level="info")

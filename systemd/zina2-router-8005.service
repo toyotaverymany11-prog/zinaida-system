@@ -1,0 +1,16 @@
+[Unit]
+Description=Zina2 Router v2.0 — DeepSeek + Бесплатные усилители (Port 8005)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+ExecStart=/usr/bin/python3 /opt/zinaida/meta_agent/router_8005_v2.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

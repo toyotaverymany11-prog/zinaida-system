@@ -1,0 +1,8 @@
+[Unit]
+Description=Zinaida Core Dummy (Legacy Compatibility)
+[Service]
+Type=simple
+ExecStart=/bin/sleep infinity
+Restart=always
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Zinaida backup — every Sunday 04:00
+Requires=zinaida-weekly-backup.service
+
+[Timer]
+OnCalendar=Sun 04:00:00
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

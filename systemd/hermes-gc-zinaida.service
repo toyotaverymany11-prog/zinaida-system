@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes GC Agent: Зинаида
+After=network.target hermes-web-ui.service
+Requires=hermes-web-ui.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /opt/zinaida/scripts/gc_agent_zinaida.py
+WorkingDirectory=/opt/zinaida/scripts
+Restart=always
+RestartSec=15
+User=root
+StandardOutput=append:/var/log/gc-agent-zinaida.log
+StandardError=append:/var/log/gc-agent-zinaida.log
+
+[Install]
+WantedBy=multi-user.target

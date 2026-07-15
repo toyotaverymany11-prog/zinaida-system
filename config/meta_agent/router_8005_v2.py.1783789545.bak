@@ -1,0 +1,830 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+ ZINA2 ROUTER v2.0 — DeepSeek + Бесплатные усилители
+================================================================================
+Порт: 8004 (тестовый)
+
+Архитектура:
+  1. Классификатор — Ollama для приветствий, Flash для всего, Pro для сложного
+  2. Пре-процессинг — Mistral чистит запрос (опционально)
+  3. Параллельный RAG-поиск — пока DeepSeek думает, Mistral ищет факты
+  4. Генерация — DeepSeek Flash (основной) или Pro (сложный)
+  5. Пост-верификация — Mistral проверяет галлюцинации
+  6. Пост-редактура — GigaChat правит русский язык
+  7. Graceful fallback — если DeepSeek упал, отвечаем через Mistral/Ollama
+
+Фишки:
+  - 5 ключей Mistral с ротацией при 429
+  - 3 ключа Ollama с ротацией
+  - Кэширование ответов (хеш запроса → ответ, TTL 5 мин)
+  - Логирование в analytics.db
+  - Чувствительность Pro — только по смыслу, не по длине
+================================================================================
+"""
+
+import sys, os, json, time, uuid, logging, asyncio, warnings, copy, hashlib, sqlite3
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+import uvicorn
+import httpx
+
+warnings.filterwarnings("ignore")
+sys.path.insert(0, str(Path(__file__).parent))
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ZINA2v2] %(message)s")
+logger = logging.getLogger("zina2_router_v2")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+app = FastAPI(title="8005 Router v2.0")
+
+# ============================================================================
+# 1. КОНФИГУРАЦИЯ
+# ============================================================================
+ENV_PATH = Path("/opt/zinaida/.env")
+META_ENV_PATH = Path("/opt/zinaida/meta_agent/.env")
+
+def load_env():
+    for p in [ENV_PATH, META_ENV_PATH]:
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, _, v = line.partition("=")
+                        os.environ.setdefault(k.strip(), v.strip())
+load_env()
+
+# --- DeepSeek — читаем напрямую из .env, игнорируя окружение (systemd может мёртвый) ---
+DEEPSEEK_KEY = ""
+for p in [ENV_PATH, META_ENV_PATH]:
+    if p.exists():
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DEEPSEEK_API_KEY") and "=" in line:
+                    val = line.split("=", 1)[1].strip()
+                    if val and val != "***" and len(val) > 10:
+                        DEEPSEEK_KEY = val
+                        break
+        if DEEPSEEK_KEY:
+            break
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
+# --- Mistral (ротация ключей) ---
+MISTRAL_KEYS = []
+for env_key in ["MISTRAL_API_KEY", "MISTRAL_API_KEY_2", "MISTRAL_API_KEY_3",
+                "MISTRAL_API_KEY_4", "MISTRAL_API_KEY_5"]:
+    val = os.getenv(env_key, "")
+    if val and val not in ("***", "") and len(val) > 10:
+        MISTRAL_KEYS.append(val)
+MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+
+# --- Ollama (ротация ключей) ---
+OLLAMA_KEYS = []
+for env_key in ["OLLAMA_API_KEY", "OLLAMA_API_KEY_2", "OLLAMA_API_KEY_3",
+                "GREG_OLLAMA_KEY"]:
+    val = os.getenv(env_key, "")
+    if val and val not in ("***", "") and len(val) > 10:
+        OLLAMA_KEYS.append(val)
+OLLAMA_URL = "https://ollama.com/v1/chat/completions"
+
+# --- GigaChat (url are hardcoded in functions, key read from .env) ---
+
+# --- Настройки ---
+PRO_CHAR_THRESHOLD  = int(os.getenv("ZINA2_PRO_CHAR", "300"))     # 300 символов — только тогда Pro
+FLASH_TIMEOUT       = float(os.getenv("ZINA2_FLASH_TIMEOUT", "30.0"))
+PRO_TIMEOUT         = float(os.getenv("ZINA2_PRO_TIMEOUT", "120.0"))
+CONNECT_TIMEOUT     = float(os.getenv("ZINA2_CONNECT_TIMEOUT", "4.0"))
+CACHE_TTL           = int(os.getenv("ZINA2_CACHE_TTL", "300"))     # 5 мин кэш
+ANALYTICS_DB        = "/opt/zinaida/memory/analytics.db"
+
+# Состояние ротации ключей
+_mistral_key_idx = 0
+_ollama_key_idx = 0
+_gigachat_token = {"token": "", "expires": 0}
+
+def _check_giga_key() -> bool:
+    """Проверяет наличие GigaChat ключа в .env"""
+    for p in [Path("/opt/zinaida/.env"), Path("/opt/zinaida/meta_agent/.env")]:
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    if ("GIGA_AUTH_KEY" in line or "GIGACHAT_AUTH_KEY" in line) and "=" in line:
+                        val = line.split("=", 1)[1].strip()
+                        if val and val != "***" and len(val) > 20:
+                            return True
+    return False
+
+# Кэш
+_cache = {}  # hash -> (response, expiry)
+
+# ============================================================================
+# 2. МОДЕЛИ
+# ============================================================================
+MODELS = {
+    "flash": {
+        "id": "deepseek-chat",
+        "name": "DeepSeek Flash",
+        "cost_per_m": 0.27,
+    },
+    "pro": {
+        "id": "deepseek-reasoner",
+        "name": "DeepSeek Pro",
+        "cost_per_m": 1.42,
+    },
+}
+
+ALLOWED_KEYS = {"model", "messages", "stream", "max_tokens", "temperature", "top_p",
+                "frequency_penalty", "presence_penalty", "stop", "user", "tools",
+                "tool_choice", "parallel_tool_calls", "response_format"}
+
+# ============================================================================
+# 3. ОПРЕДЕЛЕНИЕ: Flash или Pro?
+#    Pro — только когда реально нужно думать
+# ============================================================================
+PRO_TRIGGER_WORDS = {
+    # Глубокий анализ
+    "анализируй", "проанализируй", "глубокий разбор", "разбери подробно",
+    "сравни", "сравнение", "сопоставь", "отличие", "разница",
+    # Код/технологии (только слова >= 4 символов)
+    "код", "скрипт", "python", "javascript", "function", "debug", "баг",
+    "алгоритм", "функция", "класс", "метод", "парсер",
+    # SQL
+    "sql",
+    # Стратегия
+    "стратегия", "стратегический", "план действий", "roadmap",
+    "архитектура", "проектирование", "спроектируй",
+    # Объяснение сложного
+    "объясни подробно", "расскажи детально", "разжую", "разложи по полочкам",
+}
+
+# Слова, которые форсируют Flash
+FLASH_WORDS = {"привет", "пока", "да", "нет", "ок", "окей", "ладно",
+               "ага", "спасибо", "понял", "поняла", "хорошо", "норм",
+               "здравствуй", "прив", "как дела", "чё как", "нормально"}
+
+# Ollama-only — только если запрос из этого списка
+OLLAMA_WORDS = {"привет", "пока", "да", "нет", "ок", "окей", "здравствуй"}
+
+
+def _classify_request(messages: List[dict]) -> str:
+    """Классифицирует запрос: ollama / flash / pro"""
+    if not messages:
+        return "flash"
+
+    last_user = None
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = (m.get("content") or "").strip()
+            break
+
+    if not last_user:
+        return "flash"
+
+    text_lower = last_user.lower().strip()
+    text_len = len(last_user)
+
+    # --- 1. Приветствия и односложные → Ollama ---
+    words = text_lower.split()
+    if len(words) <= 2:
+        # Только одно/два слова и они в OLLAMA_WORDS
+        clean_words = [w.strip(".,!? ") for w in words]
+        if clean_words and all(w in OLLAMA_WORDS for w in clean_words):
+            logger.info("CLASSIFY: ollama (приветствие)")
+            return "ollama"
+
+    # --- 2. Сложный/анализ → Pro ---
+    # По триггер-словам
+    if len(words) >= 3:
+        for word in PRO_TRIGGER_WORDS:
+            if word in text_lower:
+                logger.info("CLASSIFY: pro (триггер: '%s' в '%s')", word, text_lower[:60])
+                return "pro"
+        # Если ни одно слово не сработало — логируем
+        logger.info("CLASSIFY: триггеры не сработали для: %s", text_lower[:80])
+    else:
+        logger.info("CLASSIFY: слов %d < 3, пропускаем Pro триггеры", len(words))
+
+    # По длине > 300 символов
+    if text_len > PRO_CHAR_THRESHOLD:
+        logger.info("CLASSIFY: pro (длина %d > %d)", text_len, PRO_CHAR_THRESHOLD)
+        return "pro"
+
+    # По наличию кода (латиница > 50% и есть символы { } ; :)
+    latin_ratio = sum(1 for c in last_user if c.isascii() and c.isalpha()) / max(len(last_user), 1)
+    if latin_ratio > 0.4 and any(c in last_user for c in "{};:=[]"):
+        logger.info("CLASSIFY: pro (код: латиница %.0f%%)", latin_ratio * 100)
+        return "pro"
+
+    # --- 3. Всё остальное → Flash ---
+    logger.info("CLASSIFY: flash (по умолчанию, %d символов)", text_len)
+    return "flash"
+
+
+# ============================================================================
+# 4. ВСПОМОГАТЕЛЬНЫЕ МОДУЛИ (бесплатные усилители)
+# ============================================================================
+
+# 4.1 Ротация ключей Mistral
+def _next_mistral_key() -> Optional[str]:
+    global _mistral_key_idx
+    if not MISTRAL_KEYS:
+        return None
+    key = MISTRAL_KEYS[_mistral_key_idx % len(MISTRAL_KEYS)]
+    _mistral_key_idx = (_mistral_key_idx + 1) % len(MISTRAL_KEYS)
+    return key
+
+def _next_ollama_key() -> Optional[str]:
+    global _ollama_key_idx
+    if not OLLAMA_KEYS:
+        return None
+    key = OLLAMA_KEYS[_ollama_key_idx % len(OLLAMA_KEYS)]
+    _ollama_key_idx = (_ollama_key_idx + 1) % len(OLLAMA_KEYS)
+    return key
+
+# 4.2 GigaChat — получение токена (urllib + ssl_ctx, не httpx!)
+import ssl as _ssl
+_giga_ssl_ctx = _ssl._create_unverified_context()
+_giga_last_request = 0.0
+
+async def _get_gigachat_token() -> Optional[str]:
+    global _gigachat_token
+    now = time.time()
+    if _gigachat_token["token"] and _gigachat_token["expires"] > now + 60:
+        return _gigachat_token["token"]
+    
+    # Читаем ключ напрямую из .env
+    giga_key = ""
+    for p in [ENV_PATH, META_ENV_PATH]:
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if ("GIGA_AUTH_KEY" in line or "GIGACHAT_AUTH_KEY" in line) and "=" in line:
+                        val = line.split("=", 1)[1].strip()
+                        if val and val != "***" and len(val) > 20:
+                            giga_key = val
+                            break
+        if giga_key:
+            break
+    
+    if not giga_key:
+        logger.warning("GigaChat: ключ не найден в .env")
+        return None
+    
+    try:
+        import urllib.request as _urllib
+        auth_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+        headers = {
+            "Authorization": f"Basic {giga_key}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "RqUID": "019d967c-5279-7677-bd29-e4e26eb88431",
+        }
+        data = b"scope=GIGACHAT_API_PERS"
+        req = _urllib.Request(auth_url, data=data, headers=headers, method="POST")
+        with _urllib.urlopen(req, context=_giga_ssl_ctx, timeout=15) as resp:
+            body = json.loads(resp.read())
+            _gigachat_token["token"] = body.get("access_token", "")
+            _gigachat_token["expires"] = now + body.get("expires_in", 1500) - 60
+            logger.info("GigaChat: токен получен, живёт %d сек", body.get("expires_in", 1500))
+            return _gigachat_token["token"]
+    except Exception as e:
+        logger.warning("GigaChat auth fail: %s", e)
+    return None
+
+# 4.3 Pre-processing (Mistral) — чистка запроса
+async def _preprocess_query(text: str) -> str:
+    """Mistral чистит и структурирует запрос перед DeepSeek"""
+    if not MISTRAL_KEYS or len(text) < 20:
+        return text  # Короткие не чистим
+    key = _next_mistral_key()
+    prompt = f"Извлеки суть запроса, убери мусор, перепиши чётко и структурированно. Если запрос на русском — оставь на русском. Ответь только очищенным текстом, без пояснений.\n\nЗапрос: {text}"
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(15, connect=5)) as c:
+            resp = await c.post(
+                MISTRAL_URL,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": "mistral-small-latest", "messages": [
+                    {"role": "user", "content": prompt}
+                ], "max_tokens": 500, "temperature": 0.3}
+            )
+            if resp.status_code == 200:
+                cleaned = resp.json()["choices"][0]["message"]["content"].strip()
+                if cleaned:
+                    logger.info("PREPROC: очищен запрос (%d -> %d символов)", len(text), len(cleaned))
+                    return cleaned
+    except Exception as e:
+        logger.warning("PREPROC fail: %s", e)
+    return text
+
+# 4.4 RAG-поиск отключён — 8005 универсальный роутер, не привязан к контент-заводу
+async def _search_rag(query: str) -> str:
+    return ""
+
+# 4.5 Пост-верификация (Mistral) — проверка на галлюцинации
+async def _verify_response(query: str, response: str) -> Optional[str]:
+    """Mistral проверяет ответ на галлюцинации и логику. Возвращает замечания или None."""
+    if not MISTRAL_KEYS or len(response) < 50:
+        return None
+    key = _next_mistral_key()
+    prompt = f"""Проверь ответ на:
+1. Галлюцинации — цифры/факты/статистика подтверждены?
+2. Логика — ответ связан с вопросом?
+3. Стиль — без AI-маркеров, естественно?
+
+Формат ответа (только если есть проблемы):
+❌ Проблема: [описание]
+Если всё ок — ответь: ✅ OK
+
+Вопрос: {query[:500]}
+
+Ответ: {response[:2000]}"""
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(15, connect=5)) as c:
+            resp = await c.post(
+                MISTRAL_URL,
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={"model": "mistral-small-latest", "messages": [
+                    {"role": "user", "content": prompt}
+                ], "max_tokens": 300, "temperature": 0.2}
+            )
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                if "❌" in content:
+                    logger.info("VERIFY: найдены проблемы")
+                    return content
+                logger.info("VERIFY: OK")
+    except Exception as e:
+        logger.warning("VERIFY fail: %s", e)
+    return None
+
+# 4.6 Пост-редактура (GigaChat) — правит русский язык
+async def _polish_response(response: str) -> str:
+    """GigaChat правит русский: убирает AI-штампы, делает естественнее.
+    КРИТИЧНО: time.sleep(3) перед каждым запросом — rate limit 429."""
+    global _giga_last_request
+    if len(response) < 100:
+        return response
+    token = await _get_gigachat_token()
+    if not token:
+        return response
+    
+    # Пауза 3 сек между запросами к GigaChat (rate limit!)
+    now = time.time()
+    since_last = now - _giga_last_request
+    if since_last < 3.0:
+        await asyncio.sleep(3.0 - since_last)
+    
+    import urllib.request as _urllib
+    prompt = f"Сделай текст естественнее на русском: убери AI-штампы («важно отметить», «следует понимать», «в заключение»), длинные тире замени на дефисы, сделай ритм живым. Не меняй смысл и цифры. Верни только исправленный текст.\n\n{response[:2000]}"
+    data = json.dumps({
+        "model": "GigaChat:latest",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 2048,
+        "temperature": 0.3
+    }).encode()
+    
+    try:
+        req = _urllib.Request(
+            "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+            data=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST"
+        )
+        with _urllib.urlopen(req, context=_giga_ssl_ctx, timeout=30) as resp:
+            result = json.loads(resp.read())
+            polished = result["choices"][0]["message"]["content"].strip()
+            _giga_last_request = time.time()
+            if polished:
+                logger.info("POLISH: текст обработан GigaChat (%d символов)", len(polished))
+                return polished
+    except Exception as e:
+        logger.warning("POLISH fail: %s", e)
+    return response
+
+# 4.7 Fallback — если DeepSeek упал, отвечаем через Mistral/Ollama
+async def _fallback_generate(messages: List[dict]) -> dict:
+    """Генерация ответа через бесплатные модели когда DeepSeek не отвечает"""
+    last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = (m.get("content") or "").strip()
+            break
+
+    # Пробуем Mistral
+    if MISTRAL_KEYS:
+        key = _next_mistral_key()
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(30, connect=5)) as c:
+                resp = await c.post(
+                    MISTRAL_URL,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": "mistral-small-latest", "messages": messages,
+                          "max_tokens": 1024, "temperature": 0.7}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    logger.info("FALLBACK: Mistral ответил")
+                    return data
+        except Exception as e:
+            logger.warning("FALLBACK Mistral fail: %s", e)
+
+    # Пробуем Ollama
+    if OLLAMA_KEYS:
+        key = _next_ollama_key()
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(30, connect=5)) as c:
+                resp = await c.post(
+                    OLLAMA_URL,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": "gemma3:4b", "messages": messages,
+                          "max_tokens": 512, "temperature": 0.7}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    logger.info("FALLBACK: Ollama ответил")
+                    return data
+        except Exception as e:
+            logger.warning("FALLBACK Ollama fail: %s", e)
+
+    # Всё упало — текстовый ответ
+    logger.error("FALLBACK: ВСЕ ПРОВАЙДЕРЫ МЁРТВЫ")
+    return _build_response("Извини, сейчас проблемы с нейросетями. Попробуй через минуту.", "fallback")
+
+# ============================================================================
+# 5. ВЫЗОВ DeepSeek
+# ============================================================================
+async def _call_deepseek(model_id: str, payload: dict, timeout: float) -> dict:
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_KEY}",
+        "Content-Type": "application/json",
+    }
+    work = copy.deepcopy(payload)
+    work["model"] = model_id
+
+    async with httpx.AsyncClient(verify=False,
+            timeout=httpx.Timeout(timeout, read=timeout, connect=CONNECT_TIMEOUT)) as client:
+        resp = await client.post(DEEPSEEK_URL, headers=headers, json=work)
+        if resp.status_code >= 400:
+            err_text = resp.text[:300]
+            logger.warning("DeepSeek HTTP %d: %s", resp.status_code, err_text)
+        resp.raise_for_status()
+        return resp.json()
+
+async def _call_deepseek_stream(model_id: str, payload: dict, timeout: float):
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_KEY}",
+        "Content-Type": "application/json",
+    }
+    work = copy.deepcopy(payload)
+    work["model"] = model_id
+    work["stream"] = True
+
+    client = httpx.AsyncClient(verify=False,
+            timeout=httpx.Timeout(timeout, read=timeout, connect=CONNECT_TIMEOUT))
+    try:
+        resp = await client.send(
+            client.build_request("POST", DEEPSEEK_URL, headers=headers, json=work),
+            stream=True)
+        if resp.status_code >= 400:
+            err_text = await resp.aread()
+            await resp.aclose()
+            await client.aclose()
+            raise Exception(f"HTTP {resp.status_code}: {err_text.decode()[:200]}")
+        return client, resp
+    except Exception:
+        await client.aclose()
+        raise
+
+# ============================================================================
+# 6. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================================
+def _build_response(text: str, model_key: str, model_name: str = "") -> dict:
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_name or f"8005-{model_key}",
+        "choices": [{"index": 0,
+                     "message": {"role": "assistant", "content": text},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+def sanitize_payload(payload: dict) -> dict:
+    return {k: v for k, v in payload.items() if k in ALLOWED_KEYS}
+
+def _cache_key(messages: list) -> str:
+    return hashlib.md5(json.dumps(messages, sort_keys=True).encode()).hexdigest()
+
+def _cache_get(key: str) -> Optional[dict]:
+    if key in _cache:
+        resp, expiry = _cache[key]
+        if time.time() < expiry:
+            return resp
+        del _cache[key]
+    return None
+
+def _cache_set(key: str, response: dict):
+    _cache[key] = (response, time.time() + CACHE_TTL)
+
+async def _log_request(model_used: str, char_count: int, elapsed: float, status: str):
+    """Логирование запроса в analytics.db"""
+    try:
+        conn = sqlite3.connect(ANALYTICS_DB)
+        conn.execute("""
+            INSERT INTO requests (timestamp, model, chars, elapsed, status)
+            VALUES (?, ?, ?, ?, ?)
+        """, (datetime.now().isoformat(), model_used, char_count, elapsed, status))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Не критично
+
+# ============================================================================
+# 7. ОСНОВНОЙ ПАЙПЛАЙН
+# ============================================================================
+async def _generate(messages: List[dict], is_stream: bool, timeout: float,
+                    requested_model: str = "") -> dict:
+    """Полный пайплайн: классификация → предобработка → генерация → верификация → редактура"""
+    start = time.time()
+
+    # --- Шаг 1: Классификация ---
+    if requested_model:
+        req = requested_model.lower()
+        if "pro" in req or "reasoner" in req:
+            model_key = "pro"
+        elif "v3" in req:
+            model_key = "pro"  # V3 как alias Pro
+        elif "ollama" in req:
+            model_key = "ollama"
+        elif "flash" in req:
+            model_key = "flash"
+        else:
+            # "8005-Router" или неизвестная → авто-классификация
+            model_key = _classify_request(messages)
+    else:
+        model_key = _classify_request(messages)
+
+    logger.info("PIPELINE: классификация = %s", model_key)
+
+    # --- Шаг 2: Если Ollama — простой ответ через Ollama ---
+    if model_key == "ollama" and OLLAMA_KEYS:
+        last_user = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                last_user = (m.get("content") or "").strip()
+                break
+        key = _next_ollama_key()
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(10, connect=5)) as c:
+                resp = await c.post(
+                    OLLAMA_URL,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={"model": "gemma3:4b", "messages": messages, "max_tokens": 50, "temperature": 0.5}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    text = data["choices"][0]["message"]["content"]
+                    logger.info("OLLAMA OK: ответил за %.1f сек", time.time() - start)
+                    await _log_request("ollama/gemma3:4b", len(last_user), time.time() - start, "ok")
+                    return _build_response(text, "ollama")
+        except Exception as e:
+            logger.warning("OLLAMA fail, fallback к DeepSeek Flash: %s", e)
+        model_key = "flash"  # Если Ollama не ответил — идём на Flash
+
+    # --- Шаг 3: Pre-processing (Mistral) — для длинных запросов ---
+    last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user = (m.get("content") or "").strip()
+            break
+
+    cleaned_query = last_user
+    if len(last_user) > 100 and model_key != "pro":
+        cleaned_query = await _preprocess_query(last_user)
+        if cleaned_query != last_user:
+            # Подменяем сообщение в копии messages
+            msg_copy = copy.deepcopy(messages)
+            for m in reversed(msg_copy):
+                if m.get("role") == "user":
+                    m["content"] = cleaned_query
+                    break
+            messages = msg_copy
+
+    # --- Шаг 4: RAG-поиск (параллельно с генерацией) ---
+    rag_task = None
+    if last_user and len(last_user) > 50:
+        rag_task = asyncio.create_task(_search_rag(last_user))
+
+    # --- Шаг 5: Вызов DeepSeek ---
+    model_id = MODELS.get(model_key, MODELS["flash"])["id"]
+    payload = sanitize_payload({"messages": messages, "max_tokens": 4096, "temperature": 0.7})
+
+    try:
+        ds_timeout = PRO_TIMEOUT if model_key == "pro" else FLASH_TIMEOUT
+        logger.info("CALL DS: model=%s, timeout=%s, payload_keys=%s",
+                     model_id, ds_timeout, list(payload.keys()))
+        result = await _call_deepseek(model_id, payload, ds_timeout)
+        response_text = result["choices"][0]["message"]["content"]
+        logger.info("DEEPSEEK (%s) OK: %d символов за %.1f сек",
+                    model_key, len(response_text), time.time() - start)
+
+        # RAG-результат (если успел)
+        if rag_task:
+            rag_result = await rag_task
+            if rag_result:
+                logger.info("RAG: найдено %d символов контекста", len(rag_result))
+
+        # --- Шаг 6: Пост-верификация (Mistral) — параллельно ---
+        verify_task = asyncio.create_task(_verify_response(cleaned_query, response_text))
+
+        # --- Шаг 7: Пост-редактура (GigaChat) — параллельно ---
+        polish_task = asyncio.create_task(_polish_response(response_text))
+
+        # Ждём оба (оба бесплатные, идут параллельно)
+        verify_result = await verify_task
+        polished_text = await polish_task
+
+        # --- Шаг 8: Если верификация нашла проблемы — логируем, но ответ уже отдали ---
+        if verify_result:
+            logger.warning("VERIFY: %s", verify_result[:200])
+
+        # --- Шаг 9: АВТОМАТИЧЕСКАЯ ПРОВЕРКА РОДА — принудительно женский ---
+        # Замена мужских глаголов на женские в ответе Зинаиды
+        _male_to_female = [
+            (" понял ", " поняла "), (" сделал ", " сделала "), (" пошел ", " пошла "),
+            (" пошёл ", " пошла "), (" написал ", " написала "), (" сказал ", " сказала "),
+            (" проверил ", " проверила "), (" запустил ", " запустила "),
+            (" поправил ", " поправила "), (" начал ", " начала "),
+            (" думал ", " думала "), (" ответил ", " ответила "),
+            (" решил ", " решила "), (" зашел ", " зашла "), (" зашёл ", " зашла "),
+            (" вышел ", " вышла "), (" пришел ", " пришла "), (" пришёл ", " пришла "),
+            (" ушел ", " ушла "), (" ушёл ", " ушла "), (" увидел ", " увидела "),
+            (" услышал ", " услышала "), (" открыл ", " открыла "),
+            (" закрыл ", " закрыла "), (" взял ", " взяла "),
+            (" дал ", " дала "), (" нашёл ", " нашла "), (" нашел ", " нашла "),
+            (" встал ", " встала "), (" сел ", " села "),
+            (" лег ", " легла "), (" лёг ", " легла "),
+        ]
+        for male, female in _male_to_female:
+            if male in polished_text.lower():
+                # Заменяем с учётом регистра первого слова
+                idx = polished_text.lower().find(male)
+                if idx >= 0:
+                    before = polished_text[:idx]
+                    after = polished_text[idx+len(male):]
+                    polished_text = before + female + after
+                    logger.info("GENDER FIX: '%s' → '%s'", male.strip(), female.strip())
+
+        elapsed = time.time() - start
+        await _log_request(f"deepseek/{model_key}", len(last_user), elapsed, "ok")
+        return _build_response(polished_text, model_key, f"8005-{model_key}")
+
+    except Exception as e:
+        logger.warning("DEEPSEEK %s fail: %s — fallback к бесплатным", model_key, e)
+        elapsed = time.time() - start
+        await _log_request(f"deepseek/{model_key}", len(last_user), elapsed, f"fail:{str(e)[:50]}")
+
+        # Graceful fallback
+        fallback_result = await _fallback_generate(messages)
+        return fallback_result
+
+
+# ============================================================================
+# 8. HTTP-ЭНДПОИНТЫ
+# ============================================================================
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        is_stream = data.get("stream", False)
+        timeout = float(data.get("timeout", PRO_TIMEOUT))
+        messages = data.get("messages", [])
+        requested_model = data.get("model", "")
+
+        # Проверка кэша
+        cache_key = _cache_key(messages)
+        cached = _cache_get(cache_key)
+        if cached:
+            logger.info("CACHE HIT: возвращаю кэшированный ответ")
+            cached["created"] = int(time.time())
+            return JSONResponse(cached)
+
+        if is_stream:
+            # Стрим-режим — пока без обработки, прямой DeepSeek
+            model_key = _classify_request(messages) if not requested_model else "flash"
+            if "pro" in requested_model.lower() or "reasoner" in requested_model.lower():
+                model_key = "pro"
+            model_id = MODELS.get(model_key, MODELS["flash"])["id"]
+            payload = sanitize_payload(data)
+
+            try:
+                client, resp = await _call_deepseek_stream(model_id, payload, timeout)
+                async def stream_gen(r, c):
+                    try:
+                        async for chunk in r.aiter_lines():
+                            if chunk:
+                                yield f"{chunk}\n\n"
+                    finally:
+                        await r.aclose()
+                        await c.aclose()
+                return StreamingResponse(stream_gen(resp, client),
+                                        media_type="text/event-stream")
+            except Exception as e:
+                logger.warning("STREAM FAIL: %s — fallback", e)
+                async def fb_gen():
+                    fb = _build_response("Сервис временно недоступен. Попробуй через минуту.", "fallback")
+                    payload_chunk = {
+                        "id": fb["id"], "object": "chat.completion.chunk",
+                        "created": fb["created"], "model": "8005-Fallback",
+                        "choices": [{"index": 0, "delta": {"role": "assistant",
+                                                           "content": "Сервис временно недоступен. Попробуй через минуту."},
+                                     "finish_reason": None}]}
+                    yield f"data: {json.dumps(payload_chunk, ensure_ascii=False)}\n\n"
+                    payload_chunk["choices"][0]["delta"] = {}
+                    payload_chunk["choices"][0]["finish_reason"] = "stop"
+                    yield f"data: {json.dumps(payload_chunk, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(fb_gen(), media_type="text/event-stream")
+
+        # Не-стрим: полный пайплайн
+        result = await _generate(messages, False, timeout, requested_model)
+
+        # Кэшируем
+        _cache_set(cache_key, result)
+
+        return JSONResponse(result)
+
+    except Exception as e:
+        logger.error("CRASH: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/v1/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {"id": "8005-Router", "object": "model", "owned_by": "local"},
+            {"id": "8005-Flash", "object": "model", "owned_by": "local"},
+            {"id": "8005-Pro", "object": "model", "owned_by": "local"},
+        ]
+    }
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "port": 8005,
+        "version": "2.0",
+        "deepseek": bool(DEEPSEEK_KEY),
+        "deepseek_key_preview": DEEPSEEK_KEY[:10] + "..." if DEEPSEEK_KEY else "none",
+        "mistral_keys": len(MISTRAL_KEYS),
+        "ollama_keys": len(OLLAMA_KEYS),
+        "gigachat": bool(_check_giga_key()),
+    }
+
+@app.get("/status")
+async def status():
+    return {
+        "router": "8005 Router v2.0",
+        "deepseek_key_loaded": bool(DEEPSEEK_KEY),
+        "mistral_keys_loaded": len(MISTRAL_KEYS),
+        "ollama_keys_loaded": len(OLLAMA_KEYS),
+        "gigachat_configured": bool(_check_giga_key()),
+        "pro_char_threshold": PRO_CHAR_THRESHOLD,
+        "cache_entries": len(_cache),
+        "models": {k: v["id"] for k, v in MODELS.items()},
+        "classify": {
+            "ollama": "приветствия и односложные",
+            "flash": "все обычные запросы (по умолчанию)",
+            "pro": "только сложные/анализ/код >300 символов",
+        },
+        "amplifiers": {
+            "preprocess": "Mistral чистит запрос (для >100 символов)",
+            "verify": "Mistral проверяет галлюцинации (пост-обработка)",
+            "polish": "GigaChat правит русский язык (пост-обработка)",
+            "fallback": "Mistral → Ollama если DeepSeek упал",
+        }
+    }
+
+# ============================================================================
+# 9. СТАРТ
+# ============================================================================
+if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("ZINA2 ROUTER v2.0 стартует на :8005 (ТЕСТОВЫЙ)")
+    logger.info("  DeepSeek:   %s", "✅ ключ загружен" if DEEPSEEK_KEY else "❌ НЕТ КЛЮЧА!")
+    logger.info("  Mistral:    %d ключей", len(MISTRAL_KEYS))
+    logger.info("  Ollama:     %d ключей", len(OLLAMA_KEYS))
+    logger.info("  GigaChat:   %s", "✅ настроен" if _check_giga_key() else "❌ НЕ НАСТРОЕН")
+    logger.info("  Pro порог:  %d символов", PRO_CHAR_THRESHOLD)
+    logger.info("  Кэш TTL:    %d сек", CACHE_TTL)
+    logger.info("=" * 60)
+    uvicorn.run(app, host="127.0.0.1", port=8005, log_level="info", log_config=None)

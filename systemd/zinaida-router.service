@@ -1,0 +1,17 @@
+[Unit]
+Description=Zinaida Smart Router (Port 8002)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/zinaida/meta_agent
+ExecStart=/usr/bin/python3 /opt/zinaida/meta_agent/zinaida_openai_proxy.py
+Restart=on-failure
+RestartSec=5
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
