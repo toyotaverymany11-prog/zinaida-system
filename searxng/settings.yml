@@ -1,0 +1,33 @@
+use_default_settings: true
+
+server:
+  secret_key: "super_secret_key_123"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: 5.0
+  max_request_timeout: 10.0
+  useragent_suffix: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+engines:
+  - name: duckduckgo
+    disabled: false
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: qwant
+    disabled: false

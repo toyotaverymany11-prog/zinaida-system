@@ -1,0 +1,60 @@
+from fastapi import FastAPI, Request, Header
+from fastapi.responses import JSONResponse
+import os, json
+from provider_router import route_request
+
+app = FastAPI()
+
+CORE_PATH = "/opt/zinaida/memory/knowledge/CORE.md"
+NICHES_DIR = "/root/workspace/niches"
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request, x_niche_id: str = Header(None)):
+    if not x_niche_id:
+        return JSONResponse(status_code=400, content={"error": "X-Niche-ID header required"})
+    niche_path = f"{NICHES_DIR}/{x_niche_id}"
+    if not os.path.exists(niche_path):
+        return JSONResponse(status_code=404, content={"error": f"Niche '{x_niche_id}' not found in {NICHES_DIR}"})
+
+    try:
+        brief = open(f"{niche_path}/brief.md", "r", encoding="utf-8").read() if os.path.exists(f"{niche_path}/brief.md") else "Нет описания."
+        tone = open(f"{niche_path}/tone.md", "r", encoding="utf-8").read() if os.path.exists(f"{niche_path}/tone.md") else "Нет стиля."
+        raw_dir = f"{niche_path}/raw_files"
+        files_list = os.listdir(raw_dir) if os.path.exists(raw_dir) else []
+        files_str = ", ".join(files_list) if files_list else "Нет файлов"
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Failed to load niche context: {e}"})
+
+    try:
+        core = open(CORE_PATH, "r", encoding="utf-8").read() if os.path.exists(CORE_PATH) else "Ты — Зинаида."
+    except: core = "Ты — Зинаида."
+
+    system_prompt = f"""{core}
+
+=== КОНТЕКСТ НИШИ: {x_niche_id} ===
+[BRIEF]: {brief}
+[TONE]: {tone}
+[FILES]: Доступные файлы: {files_str}
+
+ПРАВИЛО: Отвечай строго в рамках этой ниши. Не используй факты из других проектов.
+"""
+    data = await request.json()
+    messages = data.get("messages", [])
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = system_prompt + "\n" + messages[0].get("content", "")
+    else:
+        messages.insert(0, {"role": "system", "content": system_prompt})
+
+    result = route_request(messages, task_type="chat")
+
+    if "error" in result and result.get("choices") == []:
+        return JSONResponse(status_code=502, content=result)
+    return result
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "router": "zinaida_with_provider_fallback_v1"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002, log_level="info")

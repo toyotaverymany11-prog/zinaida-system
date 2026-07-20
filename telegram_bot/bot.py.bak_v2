@@ -1,0 +1,556 @@
+#!/usr/bin/env python3
+"""
+Telegram Bot Bridge для Hermes Studio (v2.0 - Вариант А)
+========================================================
+Связывает Telegram бота @DCHP_Shtab_bot с Hermes Studio API,
+чтобы использовать полный профиль Зинаиды: system prompt, навыки,
+память Mem0, историю сессии, роутер 8003.
+
+Архитектура:
+  Telegram (пользователь) ↔ Bot (polling) ↔ Hermes Gateway 8642 ↔ профиль default ↔ 8003
+
+Команды:
+  /newchat - создать новую сессию (сброс контекста)
+  /status  - статус системы
+  /start   - приветствие
+"""
+
+import asyncio
+import logging
+import os
+import sys
+import sqlite3
+import json
+import uuid
+import re
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, "/opt/zinaida")
+
+import aiohttp
+import aiofiles
+from telegram import Update
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    filters, ContextTypes
+)
+
+# === КОНФИГУРАЦИЯ ===
+BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8560310319:***")
+HERMES_GATEWAY_URL = "http://127.0.0.1:8642"
+HERMES_CHAT_RUN = f"{HERMES_GATEWAY_URL}/api/chat-run/runs"
+HERMES_SESSIONS_URL = f"{HERMES_GATEWAY_URL}/api/hermes/sessions"
+ALLOWED_CHAT_ID = int(os.getenv("TG_CHAT_ID", "6670783611"))
+PROJECTS_DB = "/opt/zinaida/projects.db"
+LOG_DIR = "/opt/zinaida/telegram_bot/logs"
+MEDIA_DIR = "/opt/zinaida/telegram_bot/media"
+SESSIONS_FILE = f"{LOG_DIR}/tg_sessions.json"
+CONSILIUM_DIR = "/opt/zinaida/shared_memory/consilium"
+
+# === ХРАНЕНИЕ СЕССИЙ ===
+# Маппинг chat_id -> session_id для Hermes Studio
+# Храним в JSON файле, чтобы сохранялось при рестарте бота
+def load_sessions():
+    try:
+        if os.path.exists(SESSIONS_FILE):
+            with open(SESSIONS_FILE, "r") as f:
+                return json.load(f)
+    except:
+        pass
+    return {}
+
+def save_sessions(sessions):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(SESSIONS_FILE, "w") as f:
+        json.dump(sessions, f, ensure_ascii=False, indent=2)
+
+# === ЛОГИРОВАНИЕ ===
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(MEDIA_DIR, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [TG-BOT-V2] %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler(f"{LOG_DIR}/bot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# === БАЗА ДАННЫХ ===
+def get_db():
+    conn = sqlite3.connect(PROJECTS_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def log_conversation(project_id, task_id, source, message, direction="in"):
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO conversations (project_id, task_id, source, message, direction, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, task_id, source, message, direction, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Не удалось записать в БД: {e}")
+
+def get_active_project(user_id):
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT id, name FROM projects WHERE active = 1 ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row:
+            return {"id": row["id"], "name": row["name"]}
+    except:
+        pass
+    return None
+
+# === ЗАГРУЗКА ПОСЛЕДНЕГО КОНСИЛИУМА ===
+def get_last_consilium():
+    """Находит последний CONSILIUM_*.md и возвращает его содержимое"""
+    try:
+        if not os.path.exists(CONSILIUM_DIR):
+            return None
+        
+        files = [f for f in os.listdir(CONSILIUM_DIR) if f.startswith("CONSILIUM_")]
+        if not files:
+            return None
+        
+        files.sort(reverse=True)
+        latest = files[0]
+        
+        with open(os.path.join(CONSILIUM_DIR, latest), "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        date_match = re.search(r'CONSILIUM_(\d{4}-\d{2}-\d{2})', latest)
+        date_str = date_match.group(1) if date_match else "неизвестно"
+        
+        return {"date": date_str, "content": content[:3000]}
+    except Exception as e:
+        logger.warning(f"Ошибка загрузки консилиума: {e}")
+        return None
+
+# === ОТПРАВКА В HERMES STUDIO ===
+async def send_to_hermes_studio(message_text, user_id, chat_id, project_context=None, media_paths=None):
+    """Отправить сообщение через Hermes Studio API (вместо прямого прокси)"""
+    
+    sessions = load_sessions()
+    chat_id_str = str(chat_id)
+    session_id = sessions.get(chat_id_str)
+    
+    # Формируем контекст сообщения
+    context_parts = []
+    context_parts.append("[Источник: telegram]")
+    
+    consilium = get_last_consilium()
+    if consilium:
+        context_parts.append(f"[Консилиум {consilium['date']}: {consilium['content'][:500]}...]")
+    
+    if project_context:
+        context_parts.append(f"[Проект: {project_context['name']}]")
+    
+    # Медиа-информация
+    media_info = ""
+    if media_paths:
+        parts = []
+        for mp in media_paths:
+            parts.append(f"[Медиа: {mp['path']}] ({mp['type']})")
+        media_info = "\n".join(parts) + "\n\n"
+    
+    full_message = " ".join(context_parts) + "\n\n" + media_info + message_text
+    
+    # Формируем payload для Hermes Studio chat run
+    payload = {
+        "input": full_message,
+        "profile": "default",
+        "provider": "custom:zina2-router",
+        "model": "Zina2-Router"
+    }
+    
+    # Если есть session_id - продолжаем ту же сессию
+    if session_id:
+        payload["session_id"] = session_id
+        logger.info(f"📎 Продолжаю сессию: {session_id}")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                HERMES_CHAT_RUN,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=180)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    reply = data.get("content", "") or data.get("reply", "") or ""
+                    
+                    # Сохраняем session_id из ответа (Hermes возвращает session_id)
+                    new_session_id = data.get("session_id", "")
+                    if new_session_id:
+                        sessions[chat_id_str] = new_session_id
+                        save_sessions(sessions)
+                    elif not session_id:
+                        # Если session_id не вернулся - пробуем взять из заголовков
+                        new_session_id = resp.headers.get("x-session-id", "")
+                        if new_session_id:
+                            sessions[chat_id_str] = new_session_id
+                            save_sessions(sessions)
+                    
+                    return reply if reply else "Зинаида думает... Попробуйте позже."
+                else:
+                    body = await resp.text()
+                    logger.error(f"Hermes Studio API error {resp.status}: {body[:500]}")
+                    
+                    # При ошибке 4xx - скорее всего сессия протухла, сбрасываем
+                    if 400 <= resp.status < 500 and session_id:
+                        logger.warning(f"Сбрасываю сессию {session_id} - ошибка {resp.status}")
+                        if chat_id_str in sessions:
+                            del sessions[chat_id_str]
+                            save_sessions(sessions)
+                        # Повторяем без session_id
+                        payload.pop("session_id", None)
+                        async with session.post(
+                            HERMES_CHAT_RUN,
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=180)
+                        ) as retry_resp:
+                            if retry_resp.status == 200:
+                                retry_data = await retry_resp.json()
+                                retry_reply = retry_data.get("content", "") or retry_data.get("reply", "") or ""
+                                retry_sid = retry_data.get("session_id", "")
+                                if retry_sid:
+                                    sessions[chat_id_str] = retry_sid
+                                    save_sessions(sessions)
+                                return retry_reply or "Зинаида думает..."
+                    
+                    return f"⚠️ Ошибка связи с Hermes Studio (код {resp.status}). Попробуйте позже."
+    except asyncio.TimeoutError:
+        return "⏳ Зинаида обрабатывает запрос... Это может занять время. Повторите через минуту."
+    except aiohttp.ClientError as e:
+        logger.error(f"Connection error: {e}")
+        return "⚠️ Не удалось связаться с Hermes Studio. Сервер может быть перезапущен."
+
+# === НОВАЯ СЕССИЯ ===
+async def cmd_newchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создать новую сессию - сброс контекста"""
+    chat_id = update.effective_chat.id
+    sessions = load_sessions()
+    chat_id_str = str(chat_id)
+    
+    old_session = sessions.pop(chat_id_str, None)
+    save_sessions(sessions)
+    
+    logger.info(f"🆕 Новая сессия для chat_id={chat_id}, старая: {old_session}")
+    await update.message.reply_text(
+        "🆕 Чат очищен! Начинаю новую сессию.\n"
+        "Теперь я не помню предыдущий разговор."
+    )
+
+# === ЗАГРУЗКА МЕДИА ===
+async def download_media(file_obj, file_name):
+    file_path = os.path.join(MEDIA_DIR, file_name)
+    try:
+        file_bytes = await file_obj.download_as_bytearray()
+        async with aiofiles.open(file_path, "wb") as f:
+            await f.write(file_bytes)
+        logger.info(f"✅ Медиа сохранено: {file_path} ({len(file_bytes)} байт)")
+        return file_path
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки медиа: {e}")
+        return None
+
+# === ОБРАБОТЧИКИ КОМАНД ===
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Привет! Я Зинаида - твой AI-партнёр.\n\n"
+        "📋 Команды:\n"
+        "/newchat - новый чат (сброс контекста)\n"
+        "/status - статус системы\n"
+        "/projects - список проектов\n"
+        "/project <имя> - переключить проект\n"
+        "/newproject <имя> - создать проект\n\n"
+        "📸 Принимаю: фото, видео, голосовые, документы, аудио.\n"
+        "Просто отправь - и я разберусь! 💬"
+    )
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    project = get_active_project(update.effective_user.id)
+    project_name = project["name"] if project else "не выбран"
+    
+    # Проверка Hermes Studio gateway
+    hs_ok = False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{HERMES_GATEWAY_URL}/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                hs_ok = resp.status == 200
+    except:
+        pass
+    
+    sessions = load_sessions()
+    session_id = sessions.get(str(update.effective_chat.id), None)
+    
+    status_emoji = "✅" if hs_ok else "❌"
+    session_status = "✅ есть" if session_id else "🆕 новая"
+    
+    await update.message.reply_text(
+        f"📊 Статус системы:\n\n"
+        f"{status_emoji} Hermes Studio Gateway: {'онлайн' if hs_ok else 'оффлайн'}\n"
+        f"🤖 Роутер: 8003 (Zina2-Router / DeepSeek)\n"
+        f"📁 Активный проект: {project_name}\n"
+        f"💬 Сессия Telegram: {session_status}\n"
+        f"🔄 /newchat - сбросить сессию"
+    )
+
+async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        conn = get_db()
+        rows = conn.execute("SELECT id, name, active FROM projects ORDER BY updated_at DESC").fetchall()
+        conn.close()
+        if not rows:
+            await update.message.reply_text("📭 Нет проектов. /newproject <имя>")
+            return
+        text = "📋 Проекты:\n"
+        for r in rows:
+            text += f"{'▶️' if r['active'] else '⬜'} {r['name']}\n"
+        await update.message.reply_text(text.strip())
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ {e}")
+
+async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /project <имя проекта>")
+        return
+    name = " ".join(context.args)
+    try:
+        conn = get_db()
+        conn.execute("UPDATE projects SET active = 0")
+        result = conn.execute("UPDATE projects SET active = 1, updated_at = ? WHERE name LIKE ?",
+                            (datetime.now().isoformat(), f"%{name}%"))
+        if result.rowcount > 0:
+            conn.commit()
+            await update.message.reply_text(f"✅ Активный проект: {name}")
+        else:
+            await update.message.reply_text(f"❌ Проект '{name}' не найден. /projects для списка")
+        conn.close()
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+async def cmd_newproject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /newproject <имя проекта>")
+        return
+    name = " ".join(context.args)
+    try:
+        conn = get_db()
+        conn.execute("UPDATE projects SET active = 0")
+        conn.execute(
+            "INSERT INTO projects (name, description, active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+            (name, "", datetime.now().isoformat(), datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"✅ Проект '{name}' создан и активирован!")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    project = get_active_project(update.effective_user.id)
+    if not project:
+        await update.message.reply_text("❌ Нет активного проекта. /projects")
+        return
+    try:
+        conn = get_db()
+        tasks = conn.execute(
+            "SELECT description, status, assigned_to FROM tasks WHERE project_id = ? ORDER BY created_at DESC LIMIT 5",
+            (project["id"],)
+        ).fetchall()
+        conn.close()
+        if not tasks:
+            await update.message.reply_text(f"📭 Нет задач в проекте '{project['name']}'")
+            return
+        text = f"📋 Задачи проекта «{project['name']}»:\n\n"
+        for t in tasks:
+            status_emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "review": "👀"}.get(t["status"], "❓")
+            text += f"{status_emoji} {t['description']}\n   → {t['assigned_to'] or 'не назначено'}\n\n"
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+# === ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ===
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message_text = update.message.text
+    chat_id = update.effective_chat.id
+
+    logger.info(f"📨 [TEXT] [{user.id}] {user.first_name}: {message_text[:100]}")
+
+    project = get_active_project(user.id)
+
+    log_conversation(
+        project_id=project["id"] if project else None,
+        task_id=None,
+        source="telegram",
+        message=message_text,
+        direction="in"
+    )
+
+    await update.message.chat.send_action("typing")
+
+    reply = await send_to_hermes_studio(message_text, user.id, chat_id, project)
+
+    log_conversation(
+        project_id=project["id"] if project else None,
+        task_id=None,
+        source="telegram",
+        message=reply,
+        direction="out"
+    )
+
+    MAX_LEN = 4096
+    if len(reply) <= MAX_LEN:
+        await update.message.reply_text(reply)
+    else:
+        for i in range(0, len(reply), MAX_LEN):
+            await update.message.reply_text(reply[i:i+MAX_LEN])
+
+    logger.info(f"📤 → [{user.id}]: {reply[:100]}")
+
+# === ОБРАБОТКА МЕДИА ===
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    caption = update.message.caption or ""
+    media_paths = []
+
+    try:
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            file_obj = await photo.get_file()
+            file_name = f"photo_{uuid.uuid4().hex[:8]}.jpg"
+            file_path = await download_media(file_obj, file_name)
+            if file_path:
+                media_paths.append({"path": file_path, "type": "photo"})
+            description = f"📸 Фото ({photo.width}×{photo.height})"
+
+        elif update.message.video:
+            video = update.message.video
+            file_obj = await video.get_file()
+            ext = video.file_name.split(".")[-1] if video.file_name else "mp4"
+            file_name = f"video_{uuid.uuid4().hex[:8]}.{ext}"
+            file_path = await download_media(file_obj, file_name)
+            if file_path:
+                media_paths.append({"path": file_path, "type": "video"})
+            description = f"🎬 Видео ({video.width}×{video.height}, {video.duration}с)"
+
+        elif update.message.voice:
+            voice = update.message.voice
+            file_obj = await voice.get_file()
+            file_name = f"voice_{uuid.uuid4().hex[:8]}.ogg"
+            file_path = await download_media(file_obj, file_name)
+            if file_path:
+                media_paths.append({"path": file_path, "type": "voice"})
+            description = f"🎤 Голосовое ({voice.duration}с)"
+
+        elif update.message.document:
+            doc = update.message.document
+            file_obj = await doc.get_file()
+            ext = doc.file_name.split(".")[-1] if doc.file_name else "bin"
+            file_name = f"doc_{uuid.uuid4().hex[:8]}.{ext}"
+            file_path = await download_media(file_obj, file_name)
+            if file_path:
+                media_paths.append({"path": file_path, "type": "document"})
+            description = f"📄 Документ: {doc.file_name} ({doc.mime_type})"
+
+        elif update.message.audio:
+            audio = update.message.audio
+            file_obj = await audio.get_file()
+            ext = audio.file_name.split(".")[-1] if audio.file_name else "mp3"
+            file_name = f"audio_{uuid.uuid4().hex[:8]}.{ext}"
+            file_path = await download_media(file_obj, file_name)
+            if file_path:
+                media_paths.append({"path": file_path, "type": "audio"})
+            description = f"🎵 Аудио: {audio.title or audio.file_name} ({audio.duration}с)"
+
+        else:
+            description = "📎 Неизвестное вложение"
+            logger.warning(f"Неизвестный тип медиа от {user.id}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки медиа: {e}", exc_info=True)
+        await update.message.reply_text(f"⚠️ Не удалось загрузить файл: {e}")
+        return
+
+    user_message = f"{description}"
+    if caption:
+        user_message += f"\n\nПодпись: {caption}"
+
+    logger.info(f"📨 [MEDIA] [{user.id}] {user.first_name}: {description} | подпись: {caption[:100] if caption else 'нет'}")
+
+    project = get_active_project(user.id)
+
+    log_conversation(
+        project_id=project["id"] if project else None,
+        task_id=None,
+        source="telegram",
+        message=user_message,
+        direction="in"
+    )
+
+    await update.message.chat.send_action("typing")
+
+    reply = await send_to_hermes_studio(user_message, user.id, chat_id, project, media_paths)
+
+    log_conversation(
+        project_id=project["id"] if project else None,
+        task_id=None,
+        source="telegram",
+        message=reply,
+        direction="out"
+    )
+
+    MAX_LEN = 4096
+    if len(reply) <= MAX_LEN:
+        await update.message.reply_text(reply)
+    else:
+        for i in range(0, len(reply), MAX_LEN):
+            await update.message.reply_text(reply[i:i+MAX_LEN])
+
+    logger.info(f"📤 → [{user.id}]: {reply[:100]}")
+
+# === MAIN ===
+def main():
+    logger.info("🚀 Запуск Telegram бота v2.0 (Hermes Studio)...")
+    logger.info(f"📡 Hermes Gateway: {HERMES_GATEWAY_URL}")
+    logger.info(f"🤖 Провайдер: custom:zina2-router (8003)")
+    logger.info(f"📁 Медиа: {MEDIA_DIR}")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Команды
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("newchat", cmd_newchat))
+    app.add_handler(CommandHandler("projects", cmd_projects))
+    app.add_handler(CommandHandler("project", cmd_project))
+    app.add_handler(CommandHandler("newproject", cmd_newproject))
+    app.add_handler(CommandHandler("task", cmd_task))
+
+    # Текстовые сообщения
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Медиа
+    app.add_handler(MessageHandler(filters.PHOTO, handle_media))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_media))
+    app.add_handler(MessageHandler(filters.VOICE, handle_media))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_media))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_media))
+
+    logger.info("✅ Бот v2.0 запущен! Ожидаю сообщения...")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()

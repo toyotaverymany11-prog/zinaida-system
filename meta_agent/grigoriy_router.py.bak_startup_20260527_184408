@@ -1,0 +1,32 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import os, json
+from provider_router import route_request # ← ИМПОРТ ОТ ЗИНАИДЫ
+
+app = FastAPI()
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    # 1. Загрузка ядра (личность Григория)
+    try:
+        core = open(CORE_PATH, "r", encoding="utf-8").read() if os.path.exists(CORE_PATH) else "Ты — Григорий, технический агент."
+    except: core = "Ты — Григорий."
+
+    data = await request.json()
+    messages = data.get("messages", [])
+    # 2. Инжект ядра в промпт
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = f"{core}\n\n{messages[0].get('content', '')}"
+    else:
+        messages.insert(0, {"role": "system", "content": core})
+
+    # 3. ВЫЗОВ ОТ ЗИНАИДЫ (с маршрутизацией под задачу)
+    result = route_request(messages, task_type="code") # ← НАПРАВЛЕНИЕ "CODE"
+
+    if "error" in result and result.get("choices") == []:
+        return JSONResponse(status_code=502, content=result)
+    return result
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "router": "grigoriy_via_shared_provider_v1"}

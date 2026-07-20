@@ -57,7 +57,7 @@ def log(msg):
 
 def load_config():
     cfg = {}
-    for env_path in ["/opt/zinaida/.env", "/opt/zinaida/config/secrets.env"]:
+    for env_path in ["/opt/zinaida/.env", "/opt/zinaida/config/secrets.env", "/opt/zinaida/meta_agent/.env"]:
         if os.path.exists(env_path):
             with open(env_path, encoding="utf-8") as f:
                 for line in f:
@@ -251,7 +251,7 @@ def main():
     
     final_messages = []
     
-    for name in ["design", "hermes"]:
+    for name in ["marketing_ai", "social_media"]:
         result = research_results.get(name)
         if result and result.get("ok"):
             factchecked = factcheck_report(RESEARCH_TOPICS[name][:120], result, cfg)
@@ -283,25 +283,32 @@ def main():
         f.write("\n".join(full_report))
     log(f"💾 Сохранено: {consilium_path}")
     
-    # Отправка в Telegram — ТОЛЬКО топ-3, без мусора
-    for title, msg in [("🤖 AI-МАРКЕТИНГ", final_messages[0] if len(final_messages) > 0 else ""),
-                       ("📱 СОЦСЕТИ/SMM", final_messages[1] if len(final_messages) > 1 else "")]:
+    # Отправка в Telegram — ОДНО сообщение, топ-2 из каждой темы (всего топ-4)
+    tg_lines = [f"🌅 Консилиум {today}"]
+    
+    for i, (title, msg) in enumerate([
+        ("🤖 AI-МАРКЕТИНГ", final_messages[0] if len(final_messages) > 0 else ""),
+        ("📱 СОЦСЕТИ/SMM", final_messages[1] if len(final_messages) > 1 else "")
+    ]):
         if msg and not msg.startswith("❌"):
-            # Вырезаем только топ-3 из ответа DeepSeek
-            tg_msg = strip_md(msg)
-            # Обрезаем до 1200 символов
-            tg_msg = tg_msg[:1200]
-            # Добавляю блок «Что я усвоила» — от первого лица
-            learning = (
-                f"\n\n🧠 Что я забираю:\n"
-                f"Сегодня я усвоила {len(tg_msg.split('→'))//3} новых факта. "
-                f"Занесла в базу знаний. Навык marketing-guide-2026 обновлён. "
-                f"Спорить с Олегом по этим темам — могу и буду."
-            )
-            send_telegram(f"🌅 Консилиум {today}\n\n{tg_msg}{learning}")
-            time.sleep(2)
+            # Вырезаем ТОЛЬКО топ-2 из ответа DeepSeek (первые 2 пункта)
+            lines = strip_md(msg).split("\n")
+            top2 = []
+            count = 0
+            for line in lines:
+                top2.append(line)
+                if line.strip().startswith(("1.", "2.", "3.", "4.", "5.")):
+                    count += 1
+                if count >= 2:
+                    break
+            tg_lines.append(f"\n{title}")
+            tg_lines.append("\n".join(top2)[:600])
         else:
-            send_telegram(f"🌅 Консилиум {today}\n\n{title}: ❌ исследование не выполнено")
+            tg_lines.append(f"\n{title}: ❌ нет данных")
+    
+    tg_msg = "\n".join(tg_lines)
+    send_telegram(tg_msg)
+    log(f"✅ Отправлено в Telegram ({len(tg_msg)} символов)")
     
     log("=" * 60)
     log(f"✅ КОНСИЛИУМ 2.0 ЗАВЕРШЁН — {today}")

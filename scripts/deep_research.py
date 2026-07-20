@@ -77,6 +77,9 @@ def load_config() -> dict:
     cfg = {}
     main_env = _parse_dotenv("/opt/zinaida/.env")
     cfg["DEEPSEEK_API_KEY"] = main_env.get("DEEPSEEK_API_KEY", "")
+    if not cfg["DEEPSEEK_API_KEY"]:
+        meta_env = _parse_dotenv("/opt/zinaida/meta_agent/.env")
+        cfg["DEEPSEEK_API_KEY"] = meta_env.get("DEEPSEEK_API_KEY", "")
     secrets_env = _parse_dotenv("/opt/zinaida/config/secrets.env")
     cfg["MISTRAL_API_KEY"] = secrets_env.get("MISTRAL_API_KEY", "")
     cfg["MISTRAL_API_KEY_2"] = secrets_env.get("MISTRAL_API_KEY_2", "")
@@ -289,6 +292,10 @@ def call_ollama(api_key, messages, timeout=60):
     return call_llm(OLLAMA_API_URL, "gemma3:4b", api_key, messages, timeout=timeout)
 
 def call_deepseek(api_key, messages, timeout=180):
+    """DeepSeek Pro — если ключа нет, fallback на 8003 (Hermes-4 бесплатно)"""
+    if not api_key:
+        log.warning("DEEPSEEK_API_KEY пуст — fallback на 8005/GitHub Models")
+        return call_llm("http://127.0.0.1:8005/v1/chat/completions", "gpt-4o-mini", "no-key", messages, temperature=0.1, max_tokens=8192, timeout=timeout)
     return call_llm(DEEPSEEK_API_URL, "deepseek-chat", api_key, messages, temperature=0.2, max_tokens=8192, timeout=timeout)
 
 # ─── ПРОМПТЫ ─────────────────────────────────────────────────────────────────

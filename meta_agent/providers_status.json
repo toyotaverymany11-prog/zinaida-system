@@ -1,0 +1,27 @@
+{
+  "ollama_cloud": {
+    "status": "ok",
+    "latency_ms": 944,
+    "vision": true,
+    "strategy_default": "filter"
+  },
+  "gigachat": {
+    "status": "key_missing",
+    "latency_ms": -1,
+    "vision": false,
+    "strategy_default": "filter"
+  },
+  "openrouter_free": {
+    "status": "error_429",
+    "latency_ms": 602,
+    "vision": true,
+    "strategy_default": "analyze",
+    "models_count": 23
+  },
+  "github": {
+    "status": "ok",
+    "latency_ms": 3756,
+    "vision": true,
+    "strategy_default": "analyze"
+  }
+}

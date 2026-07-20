@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+Zinaida Dynamic LLM Router
+Автономный роутер с динамическим обнаружением :free моделей, health-check, TTL-кэшем и каскадным fallback.
+"""
+import requests, time, logging, json, os
+from typing import List, Dict, Optional
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ROUTER] %(message)s")
+logger = logging.getLogger(__name__)
+
+class DynamicOpenRouter:
+    def __init__(self, api_key: str, cache_ttl: int = 600):
+        self.api_key = api_key
+        self.cache_ttl = cache_ttl
+        self._cache: List[str] = []
+        self._last_update: float = 0
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://zinaida.app",
+            "X-Title": "Zinaida",
+            "Content-Type": "application/json"
+        }
+
+    def _fetch_free_models(self) -> List[str]:
+        try:
+            r = requests.get("https://openrouter.ai/api/v1/models", headers=self._headers, timeout=10)
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                return [m["id"] for m in data if ":free" in m.get("id", "")]
+        except Exception as e:
+            logger.warning(f"OpenRouter models fetch failed: {e}")
+        return []
+
+    def _health_check(self, models: List[str]) -> List[str]:
+        alive = []
+        for m in models:
+            try:
+                r = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=self._headers,
+                    json={"model": m, "messages": [{"role": "user", "content": "OK"}], "max_tokens": 5},
+                    timeout=12
+                )
+                if r.status_code in (200, 429):
+                    alive.append(m)
+            except:
+                continue
+        return alive
+
+    def get_working_models(self) -> List[str]:
+        now = time.time()
+        if now - self._last_update > self.cache_ttl or not self._cache:
+            fresh = self._fetch_free_models()
+            if fresh:
+                self._cache = self._health_check(fresh)
+                self._last_update = now
+                logger.info(f"OpenRouter cache refreshed: {len(self._cache)} working models")
+        return self._cache
+
+    def call(self, messages: List[Dict], retry_depth: int = 0, **kwargs) -> Optional[Dict]:
+        if retry_depth > 1:
+            return None  # Защита от бесконечной рекурсии
+
+        models = self.get_working_models()
+        if not models:
+            return None
+
+        for model_id in models:
+            try:
+                r = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=self._headers,
+                    json={"model": model_id, "messages": messages, **kwargs},
+                    timeout=kwargs.get("timeout", 30)
+                )
+                if r.status_code == 200:
+                    return r.json()
+                elif r.status_code == 429:
+                    continue
+                else:
+                    if model_id in self._cache:
+                        self._cache.remove(model_id)
+                    continue
+            except:
+                continue
+
+        # Все упали → сброс кэша и одна повторная попытка
+        self._cache = []
+        self._last_update = 0
+        return self.call(messages, retry_depth=retry_depth + 1, **kwargs)
+
+
+class UnifiedRouter:
+    def __init__(self, config_path: str = "/opt/zinaida/sandbox/configs/api_keys.json"):
+        try:
+            with open(config_path) as f:
+                keys = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load keys: {e}")
+            keys = {}
+        zk = keys.get("zinaida_keys", {})
+        gk = keys.get("grigoriy_keys", {})
+
+        or_key = zk.get("openrouter_qwen25_coder_free", "") or gk.get("openrouter_qwen32b_free", "")
+        self.openrouter = DynamicOpenRouter(or_key) if or_key else None
+
+        self.static_providers = [
+            {"name": "github_llama33_70b", "url": "https://models.inference.ai.azure.com/chat/completions", "key": gk.get("github_llama33_70b",""), "model": "llama-3.3-70b-instruct", "timeout": 15},
+            {"name": "github_gpt41_mini", "url": "https://models.inference.ai.azure.com/chat/completions", "key": zk.get("github_gpt41_mini",""), "model": "gpt-4.1-mini", "timeout": 15},
+            {"name": "ollama_gemma4_31b", "url": "https://ollama.com/v1/chat/completions", "key": zk.get("ollama_1",""), "model": "gemma4:31b", "timeout": 20},
+            {"name": "zhipu_glm4_flash", "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions", "key": zk.get("zhipu_glm4_flash",""), "model": "glm-4-flash", "timeout": 25},
+        ]
+
+    def route(self, messages: List[Dict], **kwargs) -> Dict:
+        # 1. Статические провайдеры (быстрые, стабильные)
+        for p in self.static_providers:
+            if not p["key"]: continue
+            try:
+                r = requests.post(
+                    p["url"],
+                    headers={"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"},
+                    json={"model": p["model"], "messages": messages, **kwargs},
+                    timeout=p["timeout"]
+                )
+                if r.status_code == 200:
+                    return r.json()
+            except:
+                continue
+
+        # 2. Динамический OpenRouter fallback
+        if self.openrouter:
+            logger.info("Static providers failed. Falling back to OpenRouter dynamic pool.")
+            result = self.openrouter.call(messages, **kwargs)
+            if result:
+                return result
+
+        # 3. Финальный fallback
+        return {
+            "id": "router-fallback",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "router-fallback",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "⚠️ Все провайдеры временно недоступны. Повторите запрос через 30 секунд."}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+
+# Экспорт для zinaida-core
+router = UnifiedRouter()

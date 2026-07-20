@@ -1,0 +1,162 @@
+import os, json, time, threading, logging, uuid, requests
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+
+app = FastAPI(title="Zinaida Router v2.0")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ROUTER] %(message)s")
+log = logging.getLogger(__name__)
+
+KEYS_FILE = "/opt/zinaida/sandbox/configs/api_keys.json"
+METRICS_FILE = "/opt/zinaida/logs/router_metrics.jsonl"
+os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[Message]
+    model: Optional[str] = None
+    stream: Optional[bool] = False
+    max_tokens: Optional[int] = 1024
+    temperature: Optional[float] = 0.7
+
+PROVIDERS = {
+    "openrouter": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "qwen/qwen3-8b:free",
+        "headers_extra": {"HTTP-Referer": "https://zinaida.local", "X-Title": "Zinaida"}
+    },
+    "github": {
+        "url": "https://models.inference.ai.azure.com/chat/completions",
+        "model": "gpt-4.1-mini",
+        "headers_extra": {}
+    },
+    "zhipu": {
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "model": "glm-4-flash",
+        "headers_extra": {}
+    }
+}
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold=3, reset_timeout=60):
+        self.threshold = failure_threshold
+        self.reset_timeout = reset_timeout
+        self.state = {name: {"failures": 0, "last_fail": 0, "open": False} for name in PROVIDERS}
+        self.lock = threading.Lock()
+
+    def record_success(self, name):
+        with self.lock:
+            self.state[name]["failures"] = 0
+            self.state[name]["open"] = False
+
+    def record_failure(self, name):
+        with self.lock:
+            s = self.state[name]
+            s["failures"] += 1
+            s["last_fail"] = time.time()
+            if s["failures"] >= self.threshold:
+                s["open"] = True
+                log.warning(f"Circuit OPEN for {name} after {s['failures']} failures")
+
+    def is_available(self, name):
+        with self.lock:
+            s = self.state[name]
+            if not s["open"]:
+                return True
+            if time.time() - s["last_fail"] > self.reset_timeout:
+                s["open"] = False
+                s["failures"] = 0
+                log.info(f"Circuit RESET for {name}")
+                return True
+            return False
+
+cb = CircuitBreaker()
+
+def load_keys():
+    try:
+        with open(KEYS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log.error(f"Keys load error: {e}")
+        return {}
+
+def call_provider(name, messages, timeout=(5, 12)):
+    keys = load_keys()
+    cfg = PROVIDERS[name]
+    api_key = keys.get(name, keys.get(f"{name}_key", ""))
+    if not api_key:
+        raise ValueError(f"No key for {name}")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        **cfg["headers_extra"]
+    }
+    payload = {
+        "model": cfg["model"],
+        "messages": [m.dict() if hasattr(m, "dict") else m for m in messages],
+        "max_tokens": 1024,
+        "temperature": 0.7,
+        "stream": False
+    }
+    resp = requests.post(cfg["url"], headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        raise ValueError("Empty content from provider")
+    return content
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatRequest):
+    trace_id = str(uuid.uuid4())[:8]
+    start = time.time()
+    log.info(f"[{trace_id}] Incoming request, intent: chat")
+
+    for name in ["openrouter", "github", "zhipu"]:
+        if not cb.is_available(name):
+            log.info(f"[{trace_id}] Skipping {name} (circuit open)")
+            continue
+        try:
+            log.info(f"[{trace_id}] Trying {name}...")
+            result = call_provider(name, req.messages)
+            cb.record_success(name)
+            latency = round(time.time() - start, 2)
+            log.info(f"[{trace_id}] Success via {name} in {latency}s")
+            with open(METRICS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"trace_id": trace_id, "provider": name, "status": "success", "latency_ms": int(latency*1000), "ts": time.time()}) + "\n")
+            return JSONResponse({
+                "id": f"chatcmpl-{trace_id}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": PROVIDERS[name]["model"],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": result}, "finish_reason": "stop"}]
+            })
+        except Exception as e:
+            log.warning(f"[{trace_id}] {name} failed: {e}")
+            cb.record_failure(name)
+            continue
+
+    latency = round(time.time() - start, 2)
+    log.error(f"[{trace_id}] All providers failed in {latency}s")
+    with open(METRICS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"trace_id": trace_id, "provider": "none", "status": "all_failed", "latency_ms": int(latency*1000), "ts": time.time()}) + "\n")
+    return JSONResponse({
+        "id": f"chatcmpl-{trace_id}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": "router-fallback",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "⛔ Все провайдеры недоступны. Проверьте ключи в api_keys.json или лимиты."}, "finish_reason": "stop"}]
+    }, status_code=503)
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "ts": time.time()}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

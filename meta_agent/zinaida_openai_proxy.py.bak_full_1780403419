@@ -1,0 +1,54 @@
+import sys, os, json, time, uuid, logging, asyncio
+from asyncio import wait_for, TimeoutError as AsyncTimeout
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import uvicorn
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("zinaida_proxy")
+
+try:
+    from router_zinaida import call_zinaida
+    from router_grigoriy import call_grigoriy
+except ImportError as e:
+    def call_zinaida(*args, **kwargs): return f"Router import failed: {e}"
+    def call_grigoriy(*args, **kwargs): return f"Router import failed: {e}"
+
+app = FastAPI()
+PROXY_TIMEOUT = 120.0
+
+code_triggers = ["код", "скрипт", "функция", "класс", "алгоритм", "def ", "import ", "python", "bash", "js", "json", "html", "sql", "debug", "рефакторинг", "code", "script", "function", "task", "curator", "skill", "memory", "kanban"]
+
+@app.get("/status")
+def status(): return {"status": "ok", "router": "zinaida_proxy_v6"}
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    messages = data.get("messages", [])
+    user_text = ""
+    for m in messages:
+        if m.get("role") == "user":
+            user_text += str(m.get("content", "")) + " "
+    user_text = user_text.lower()
+    is_code = any(kw in user_text for kw in code_triggers)
+    task_type = "code" if is_code else "chat"
+    system_prompt = "You are a helpful assistant."
+    try:
+        if task_type == "code":
+            raw = await wait_for(asyncio.to_thread(call_grigoriy, prompt=user_text, system=system_prompt, task_type=task_type), timeout=PROXY_TIMEOUT)
+        else:
+            raw = await wait_for(asyncio.to_thread(call_zinaida, prompt=user_text, system=system_prompt, task_type=task_type), timeout=PROXY_TIMEOUT)
+    except AsyncTimeout:
+        return JSONResponse({"error": "Gateway timeout >120s"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": f"Router exception: {str(e)}"}, status_code=502)
+    if not raw or "failed" in str(raw).lower() or "error" in str(raw).lower():
+        return JSONResponse({"error": raw}, status_code=503)
+    return JSONResponse({"id": f"chatcmpl-{uuid.uuid4().hex[:8]}", "object": "chat.completion", "created": int(time.time()), "model": "router-dispatch", "choices": [{"index": 0, "message": {"role": "assistant", "content": raw}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}})
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

@@ -1,0 +1,122 @@
+{
+  "port_8002": {
+    "name": "Роутер Зинаида",
+    "group": "brain",
+    "function": "Маршрутизация запросов, управление API.",
+    "mechanism": "Принимает JSON. Анализирует интент. Делегирует код на :8003, память на :8505. Fallback на локальную модель при сбое.",
+    "stack": "Python, FastAPI, Uvicorn",
+    "schedule": "Постоянно",
+    "deps": "Григорий, Память",
+    "status": "active",
+    "confidence": 0.95,
+    "last_seen": 1780551474.6597943
+  },
+  "port_8003": {
+    "name": "Агент Григорий",
+    "group": "brain",
+    "function": "Анализ кода, оптимизация, сложная логика.",
+    "mechanism": "Получает промпт от роутера. Генерирует код. Возвращает результат.",
+    "stack": "Python, LLM API",
+    "schedule": "По запросу",
+    "deps": "Зинаида (:8002)",
+    "status": "active",
+    "confidence": 0.95,
+    "last_seen": 1780551474.659799
+  },
+  "port_8004": {
+    "name": "Прокси API",
+    "group": "nerves",
+    "function": "Балансировка нагрузки, проксирование.",
+    "mechanism": "Перенаправляет внешние запросы. Кэширует ответы.",
+    "stack": "Python, HTTP Proxy",
+    "schedule": "Постоянно",
+    "deps": "Зинаида (:8002)",
+    "status": "active",
+    "confidence": 0.95,
+    "last_seen": 1780551474.659802
+  },
+  "port_8787": {
+    "name": "Hermes WebUI",
+    "group": "hands",
+    "function": "Веб-интерфейс управления, чат.",
+    "mechanism": "Отдает статику. Принимает POST запросы чата. Интеграция с Gateway.",
+    "stack": "Node.js/Python, Caddy",
+    "schedule": "Постоянно",
+    "deps": "Gateway, Caddy",
+    "status": "active",
+    "confidence": 0.95,
+    "last_seen": 1780551474.6598046
+  },
+  "proc_autopilot": {
+    "name": "Автопилот",
+    "group": "nerves",
+    "function": "Управляет циклом самообучения.",
+    "mechanism": "Event loop. Запускает задачи по расписанию. Мониторит логи.",
+    "stack": "Python, systemd",
+    "schedule": "Постоянно",
+    "deps": "Память, Cron",
+    "status": "active",
+    "confidence": 0.95,
+    "last_seen": 1780551474.6598067
+  },
+  "proc_vk_bot": {
+    "name": "VK Бот",
+    "group": "hands",
+    "function": "Приём сообщений из ВКонтакте.",
+    "mechanism": "Callback API. Ответы через messages.send.",
+    "stack": "Python, vk_api",
+    "schedule": "Постоянно",
+    "deps": "Роутер",
+    "status": "active",
+    "confidence": 0.95,
+    "last_seen": 1780551474.6598089
+  },
+  "proc_grigoriy": {
+    "name": "Процесс Григория",
+    "group": "brain",
+    "function": "Фоновый воркер анализа.",
+    "mechanism": "Обрабатывает очереди кода. Оптимизирует скрипты.",
+    "stack": "Python",
+    "schedule": "Постоянно",
+    "deps": "Порт 8003",
+    "status": "active",
+    "confidence": 0.95,
+    "last_seen": 1780551474.659811
+  },
+  "file_night_synthesis.py": {
+    "name": "Ночной Синтез",
+    "group": "subconscious",
+    "function": "Глубокий анализ логов, консолидация знаний.",
+    "mechanism": "Запускается cron в 03:00. Читает логи за день. Пишет в память.",
+    "stack": "Python, Cron",
+    "schedule": "03:00 ежедневно",
+    "deps": "Логи, Память",
+    "status": "present",
+    "confidence": 0.95,
+    "last_seen": 1780551474.6598134
+  },
+  "file_memory_consolidator.py": {
+    "name": "Консолидатор Памяти",
+    "group": "heart",
+    "function": "Сжатие дублей навыков, очистка БД.",
+    "mechanism": "VACUUM SQLite. Удаление устаревших записей.",
+    "stack": "Python, SQLite",
+    "schedule": "04:00 ежедневно",
+    "deps": "SQLite",
+    "status": "present",
+    "confidence": 0.95,
+    "last_seen": 1780551474.6598175
+  },
+  "file_self_reflection.py": {
+    "name": "Саморефлексия",
+    "group": "brain",
+    "function": "Анализ успешных фиксов.",
+    "mechanism": "Сравнивает ошибки и решения. Обновляет CORE.md.",
+    "stack": "Python",
+    "schedule": "Каждые 15 мин",
+    "deps": "Логи",
+    "status": "present",
+    "confidence": 0.95,
+    "last_seen": 1780551474.6598194
+  }
+}

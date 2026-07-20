@@ -1,0 +1,1 @@
+/root/.hermes/memories/MEMORY.md

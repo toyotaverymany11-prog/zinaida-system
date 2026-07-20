@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""
+Telegram Bot Bridge для Hermes/Zinaida
+======================================
+Связывает Telegram бота @DCHP_Shtab_bot с агентом Зинаида через Hermes gateway.
+
+Архитектура:
+  Telegram (пользователь) ↔ Bot (polling) ↔ Hermes API (Zinaida) ↔ Grigoriy
+
+Дополнительные возможности поверх базового gateway:
+- Управление проектами (/project, /projects, /newproject)
+- Логирование в SQLite
+- Уведомления от Зинаиды
+"""
+
+import asyncio
+import logging
+import os
+import sys
+import sqlite3
+import json
+from datetime import datetime
+from pathlib import Path
+
+# Добавляем путь к модулям
+sys.path.insert(0, "/opt/zinaida")
+
+import aiohttp
+from telegram import Update, BotCommand
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    filters, ContextTypes
+)
+
+# === КОНФИГУРАЦИЯ ===
+BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8560310319:AAFFS5ubSS0FQI8xowTl9TCg3UrOw6J3pIk")
+HERMES_API_URL = "http://127.0.0.1:8644"  # Zinaida API server
+HERMES_CHAT_URL = f"{HERMES_API_URL}/v1/chat/completions"
+ALLOWED_CHAT_ID = int(os.getenv("TG_CHAT_ID", "6670783611"))
+PROJECTS_DB = "/opt/zinaida/projects.db"
+LOG_DIR = "/opt/zinaida/telegram_bot/logs"
+
+# === ЛОГИРОВАНИЕ ===
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [TG-BOT] %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler(f"{LOG_DIR}/bot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# === БАЗА ДАННЫХ ===
+def get_db():
+    """Подключение к БД проектов"""
+    conn = sqlite3.connect(PROJECTS_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def log_conversation(project_id, task_id, source, message, direction="in"):
+    """Логирование сообщения в БД"""
+    try:
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO conversations (project_id, task_id, source, message, direction, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, task_id, source, message, direction, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Не удалось записать в БД: {e}")
+
+def get_active_project(user_id):
+    """Получить активный проект пользователя"""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT id, name FROM projects WHERE active = 1 ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row:
+            return {"id": row["id"], "name": row["name"]}
+    except:
+        pass
+    return None
+
+# === ОТПРАВКА В HERMES ===
+async def send_to_hermes(message_text, user_id, project_context=None):
+    """Отправить сообщение Зинаиде через Hermes API"""
+    
+    # Формируем контекст
+    context_prefix = ""
+    if project_context:
+        context_prefix = f"[Проект: {project_context['name']}] [Источник: telegram] "
+    
+    payload = {
+        "model": "zinaida",
+        "messages": [
+            {
+                "role": "user",
+                "content": context_prefix + message_text
+            }
+        ],
+        "stream": False
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                HERMES_CHAT_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    return reply if reply else "Зинаида думает... Попробуйте позже."
+                else:
+                    body = await resp.text()
+                    logger.error(f"Hermes API error {resp.status}: {body}")
+                    return f"⚠️ Ошибка связи с Зинаидой (код {resp.status}). Попробуйте позже."
+    except asyncio.TimeoutError:
+        return "⏳ Зинаида обрабатывает запрос... Это может занять время. Повторите через минуту."
+    except aiohttp.ClientError as e:
+        logger.error(f"Connection error: {e}")
+        return "⚠️ Не удалось связаться с Зинаидой. Сервер может быть перезапущен."
+
+# === ОБРАБОТЧИКИ КОМАНД ===
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приветствие"""
+    await update.message.reply_text(
+        "👋 Привет! Я бот штаба DCHP.\n\n"
+        "Через меня ты общаешься с Зинаидой — главным агентом контент-фабрики.\n\n"
+        "📋 Команды:\n"
+        "/projects — список проектов\n"
+        "/project <имя> — переключить проект\n"
+        "/newproject <имя> — создать новый проект\n"
+        "/status — статус системы\n"
+        "/task — текущая задача\n\n"
+        "Просто напиши сообщение — и Зинаида ответит! 💬"
+    )
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статус системы"""
+    project = get_active_project(update.effective_user.id)
+    project_name = project["name"] if project else "не выбран"
+    
+    # Проверяем Hermes
+    hermes_ok = False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{HERMES_API_URL}/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                hermes_ok = resp.status == 200
+    except:
+        pass
+    
+    status_emoji = "✅" if hermes_ok else "❌"
+    await update.message.reply_text(
+        f"📊 Статус системы:\n\n"
+        f"{status_emoji} Hermes/Зинаида: {'онлайн' if hermes_ok else 'оффлайн'}\n"
+        f"📁 Активный проект: {project_name}\n"
+        f"🤖 Бот: работает\n"
+        f"👤 Григорий (дизайнер): готов\n"
+    )
+
+async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Список проектов"""
+    try:
+        conn = get_db()
+        rows = conn.execute("SELECT id, name, description, active FROM projects ORDER BY updated_at DESC").fetchall()
+        conn.close()
+        
+        if not rows:
+            await update.message.reply_text("📭 Проектов пока нет. Создайте: /newproject <имя>")
+            return
+        
+        text = "📋 Проекты:\n\n"
+        for r in rows:
+            marker = "▶️" if r["active"] else "⬜"
+            text += f"{marker} {r['name']}\n   {r['description'] or 'без описания'}\n\n"
+        
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Переключить активный проект"""
+    if not context.args:
+        await update.message.reply_text("Использование: /project <имя проекта>")
+        return
+    
+    name = " ".join(context.args)
+    try:
+        conn = get_db()
+        # Снимаем active со всех
+        conn.execute("UPDATE projects SET active = 0")
+        # Ставим active на нужный
+        result = conn.execute("UPDATE projects SET active = 1, updated_at = ? WHERE name LIKE ?", 
+                            (datetime.now().isoformat(), f"%{name}%"))
+        if result.rowcount > 0:
+            conn.commit()
+            await update.message.reply_text(f"✅ Активный проект: {name}")
+        else:
+            await update.message.reply_text(f"❌ Проект '{name}' не найден. /projects для списка")
+        conn.close()
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+async def cmd_newproject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создать новый проект"""
+    if not context.args:
+        await update.message.reply_text("Использование: /newproject <имя проекта>")
+        return
+    
+    name = " ".join(context.args)
+    try:
+        conn = get_db()
+        conn.execute("UPDATE projects SET active = 0")
+        conn.execute(
+            "INSERT INTO projects (name, description, active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+            (name, "", datetime.now().isoformat(), datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"✅ Проект '{name}' создан и активирован!")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Текущая задача"""
+    project = get_active_project(update.effective_user.id)
+    if not project:
+        await update.message.reply_text("❌ Нет активного проекта. /projects")
+        return
+    
+    try:
+        conn = get_db()
+        tasks = conn.execute(
+            "SELECT description, status, assigned_to FROM tasks WHERE project_id = ? ORDER BY created_at DESC LIMIT 5",
+            (project["id"],)
+        ).fetchall()
+        conn.close()
+        
+        if not tasks:
+            await update.message.reply_text(f"📭 Нет задач в проекте '{project['name']}'")
+            return
+        
+        text = f"📋 Задачи проекта «{project['name']}»:\n\n"
+        for t in tasks:
+            status_emoji = {"pending": "⏳", "in_progress": "🔄", "done": "✅", "review": "👀"}.get(t["status"], "❓")
+            text += f"{status_emoji} {t['description']}\n   → {t['assigned_to'] or 'не назначено'}\n\n"
+        
+        await update.message.reply_text(text)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+
+# === ОБРАБОТКА СООБЩЕНИЙ ===
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений — передача Зинаиде"""
+    user = update.effective_user
+    message_text = update.message.text
+    
+    logger.info(f"📨 [{user.id}] {user.first_name}: {message_text[:100]}")
+    
+    # Получаем активный проект
+    project = get_active_project(user.id)
+    
+    # Логируем входящее
+    log_conversation(
+        project_id=project["id"] if project else None,
+        task_id=None,
+        source="telegram",
+        message=message_text,
+        direction="in"
+    )
+    
+    # Показываем "печатает..."
+    await update.message.chat.send_action("typing")
+    
+    # Отправляем Зинаиде
+    reply = await send_to_hermes(message_text, user.id, project)
+    
+    # Логируем исходящее  
+    log_conversation(
+        project_id=project["id"] if project else None,
+        task_id=None,
+        source="telegram",
+        message=reply,
+        direction="out"
+    )
+    
+    # Разбиваем длинные сообщения
+    MAX_LEN = 4096
+    if len(reply) <= MAX_LEN:
+        await update.message.reply_text(reply)
+    else:
+        for i in range(0, len(reply), MAX_LEN):
+            await update.message.reply_text(reply[i:i+MAX_LEN])
+    
+    logger.info(f"📤 → [{user.id}]: {reply[:100]}")
+
+# === УТИЛИТЫ ДЛЯ ЗИНАИДЫ ===
+async def send_notification(chat_id, text):
+    """Отправить уведомление пользователю (вызывается из Зинаиды)"""
+    from telegram import Bot
+    bot = Bot(token=BOT_TOKEN)
+    await bot.send_message(chat_id=chat_id, text=text)
+
+# === MAIN ===
+def main():
+    """Запуск бота"""
+    logger.info("🚀 Запуск Telegram бота @DCHP_Shtab_bot...")
+    logger.info(f"📡 Hermes API: {HERMES_API_URL}")
+    logger.info(f"📁 Projects DB: {PROJECTS_DB}")
+    
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Команды
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("projects", cmd_projects))
+    app.add_handler(CommandHandler("project", cmd_project))
+    app.add_handler(CommandHandler("newproject", cmd_newproject))
+    app.add_handler(CommandHandler("task", cmd_task))
+    
+    # Сообщения
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Запуск polling
+    logger.info("✅ Бот запущен! Ожидаю сообщений...")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()

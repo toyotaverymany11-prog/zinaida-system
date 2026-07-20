@@ -1,0 +1,316 @@
+import sys, os, json, time, uuid, logging, asyncio, warnings, base64, copy
+from pathlib import Path
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+import uvicorn
+import httpx
+
+warnings.filterwarnings("ignore")
+sys.path.insert(0, str(Path(__file__).parent))
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ROUTER] %(message)s")
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Zinaida Smart Router")
+
+ENV_PATH = Path("/opt/zinaida/.env")
+def load_env():
+    if ENV_PATH.exists():
+        with open(ENV_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
+load_env()
+
+# ============================================================
+# ЛИМИТЫ СЖАТИЯ КОНТЕНТА (защита от 413/400/429)
+# Причина ошибок 503: вывод инструментов (search_files/read_file/execute_code)
+# весит сотни КБ и превышает лимиты провайдеров. Режем размер КАЖДОГО
+# сообщения и суммарный payload ПЕРЕД отправкой.
+# ============================================================
+MAX_MSG_CHARS = int(os.getenv("ROUTER_MAX_MSG_CHARS", "6000"))
+MAX_TOTAL_CHARS = int(os.getenv("ROUTER_MAX_TOTAL_CHARS", "45000"))
+
+PROVIDERS = {
+    "zhipu": {"url": "https://open.bigmodel.cn/api/paas/v4/chat/completions", "key": os.getenv("ZHIPU_API_KEY", ""), "model": "glm-4-flash"},
+    "github": {"url": "https://models.github.ai/inference/chat/completions", "key": os.getenv("GITHUB_TOKEN", ""), "model": "gpt-4.1-mini"},
+    "mistral": {"url": "https://api.mistral.ai/v1/chat/completions", "key": os.getenv("MISTRAL_API_KEY", ""), "model": "mistral-small-latest"},
+    "openrouter": {"url": "https://openrouter.ai/api/v1/chat/completions", "key": os.getenv("OPENROUTER_API_KEY_2", ""), "model": "meta-llama/llama-3.3-70b-instruct:free"},
+    "gigachat": {"url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions", "key": os.getenv("GIGACHAT_CLIENT_ID", ""), "model": "GigaChat-2-Max"}
+}
+
+# GigaChat выше openrouter: свой стабильный резерв важнее нестабильных free-моделей
+ORDER_CHAT = ["mistral", "github", "gigachat", "openrouter"]
+ORDER_CODE = ["mistral", "github", "openrouter", "gigachat"]
+ALLOWED_KEYS = {"model", "messages", "stream", "max_tokens", "temperature", "top_p", "frequency_penalty", "presence_penalty", "stop", "user", "tools", "tool_choice", "parallel_tool_calls", "response_format"}
+
+def is_code_request(messages):
+    if not messages: return False
+    last_msg = (messages[-1].get("content") or "")
+    if not isinstance(last_msg, str): return False
+    last_msg = last_msg.lower()
+    keywords = ["код", "скрипт", "python", "html", "css", "javascript", "function", "def ", "class ", "напиши программу", "code", "script", "api", "json", "sql"]
+    return any(kw in last_msg for kw in keywords)
+
+def truncate_messages(messages, max_keep=24):
+    if len(messages) <= max_keep + 1: return messages
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    non_system = [m for m in messages if m.get("role") != "system"]
+    recent = non_system[-max_keep:]
+    while recent and recent[0].get("role") != "user":
+        recent.pop(0)
+    if not recent:
+        recent = non_system[-max_keep:]
+    return system_msgs + recent
+
+def _truncate_text(text, limit):
+    """Умная обрезка: голова + маркер + хвост. Сохраняет начало и конец больших выводов."""
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    head = int(limit * 0.6)
+    tail = max(limit - head - 60, 200)
+    cut = len(text) - head - tail
+    return text[:head] + f"\n\n...[обрезано {cut} символов для экономии контекста]...\n\n" + text[-tail:]
+
+def shrink_messages(messages, max_msg=MAX_MSG_CHARS, max_total=MAX_TOTAL_CHARS):
+    """Ограничивает размер каждого сообщения и суммарный payload.
+    Системные сообщения не режем на первом проходе (там ДНК агента),
+    но если общий объём всё ещё велик — ужимаем и их."""
+    out = []
+    for m in messages:
+        m = dict(m)
+        c = m.get("content")
+        if isinstance(c, str) and m.get("role") != "system":
+            m["content"] = _truncate_text(c, max_msg)
+        out.append(m)
+
+    def total(msgs):
+        return sum(len(x.get("content") or "") for x in msgs if isinstance(x.get("content"), str))
+
+    limit = max_msg
+    # Итеративно ужимаем самые тяжёлые сообщения пока не влезем в общий лимит
+    while total(out) > max_total and limit > 600:
+        limit = int(limit * 0.6)
+        for m in out:
+            if isinstance(m.get("content"), str) and m.get("role") != "system":
+                m["content"] = _truncate_text(m["content"], limit)
+    # Крайний случай: даже без tool-выводов не влезаем -> режем и системные
+    if total(out) > max_total:
+        sys_limit = max(int(max_total * 0.5), 4000)
+        for m in out:
+            if isinstance(m.get("content"), str) and m.get("role") == "system":
+                m["content"] = _truncate_text(m["content"], sys_limit)
+    return out
+
+def sanitize_payload(payload):
+    return {k: v for k, v in payload.items() if k in ALLOWED_KEYS}
+
+def _fix_b64_padding(s):
+    s = s.strip()
+    missing = len(s) % 4
+    if missing:
+        s += "=" * (4 - missing)
+    return s
+
+# Кэш токена GigaChat: не запрашиваем на каждый запрос, обновляем за 5 мин до истечения
+_gc_token = {"value": None, "exp": 0.0}
+
+async def get_gigachat_token(force=False):
+    now = time.time()
+    if not force and _gc_token["value"] and now < _gc_token["exp"]:
+        return _gc_token["value"]
+    try:
+        # Приоритет: готовый Base64-ключ (client_id:client_secret). Иначе собираем сами.
+        auth_key = os.getenv("GIGACHAT_AUTH_KEY", "").strip()
+        if auth_key:
+            b64_auth = _fix_b64_padding(auth_key)
+        else:
+            client_id = os.getenv("GIGACHAT_CLIENT_ID", "")
+            client_secret = os.getenv("GIGACHAT_CLIENT_SECRET", "")
+            if not client_id or not client_secret:
+                return None
+            b64_auth = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+            resp = await client.post(
+                "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+                headers={"Authorization": f"Basic {b64_auth}", "RqUID": str(uuid.uuid4()), "Content-Type": "application/x-www-form-urlencoded"},
+                data={"scope": "GIGACHAT_API_PERS"}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            tok = data.get("access_token")
+            # expires_at приходит в миллисекундах epoch
+            exp_ms = data.get("expires_at", 0)
+            exp = (exp_ms / 1000.0) if exp_ms else (now + 1800)
+            _gc_token["value"] = tok
+            _gc_token["exp"] = exp - 300  # обновлять за 5 мин до истечения
+            logger.info("GigaChat token refreshed, valid until %.0f", _gc_token["exp"])
+            return tok
+    except Exception as e:
+        logger.warning(f"GigaChat token failed: {e}")
+        return None
+
+async def prepare_payload_and_headers(name: str, payload: dict, max_msg=MAX_MSG_CHARS, max_total=MAX_TOTAL_CHARS):
+    p = PROVIDERS[name]
+    headers = {"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"}
+    work = sanitize_payload(copy.deepcopy(payload))
+    msgs = truncate_messages(work.get("messages", []))
+    msgs = shrink_messages(msgs, max_msg=max_msg, max_total=max_total)  # <== СЖАТИЕ КОНТЕНТА
+    work["messages"] = msgs
+    work["model"] = p["model"]
+    if name == "openrouter":
+        headers.update({"HTTP-Referer": "https://zinaida.local", "X-Title": "ZinaidaRouter"})
+    elif name == "gigachat":
+        token = await get_gigachat_token()
+        if not token:
+            raise Exception("No GigaChat token")
+        headers["Authorization"] = f"Bearer {token}"
+    elif name == "github":
+        work["model"] = "gpt-4.1-mini"
+    elif name == "mistral":
+        filtered = []
+        for msg in work.get("messages", []):
+            if msg.get("role") == "system" and len(filtered) > 0:
+                continue
+            filtered.append(msg)
+        work["messages"] = filtered
+    return headers, work
+
+async def call_provider_json(name: str, payload: dict, timeout: float = 30.0, max_msg=MAX_MSG_CHARS, max_total=MAX_TOTAL_CHARS):
+    p = PROVIDERS[name]
+    headers, work = await prepare_payload_and_headers(name, payload, max_msg, max_total)
+    async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(timeout, read=timeout, connect=30.0)) as client:
+        resp = await client.post(p["url"], headers=headers, json=work)
+        resp.raise_for_status()
+        return resp.json()
+
+def _status_of(exc):
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        return resp.status_code
+    return None
+
+def _fallback_response():
+    """Вместо голого 503 -> корректный ответ OpenAI-формата (статус 200),
+    чтобы Hermes Studio показал текст, а не красную ошибку."""
+    return {
+        "id": "chatcmpl-fallback",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": "Zinaida-Router",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Провайдеры сейчас перегружены. Повтори запрос через минуту — я отвечу."},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    }
+
+async def try_provider_with_healing(name, data, timeout):
+    """Одна попытка провайдера с самолечением по коду ошибки.
+    Возвращает (result_json | None)."""
+    try:
+        return await call_provider_json(name, data, timeout)
+    except httpx.HTTPStatusError as e:
+        code = _status_of(e)
+        logger.warning(f"Provider {name} HTTP {code}")
+        if code == 401 and name == "gigachat":
+            # токен протух -> форсим обновление и одна повторная попытка
+            await get_gigachat_token(force=True)
+            try:
+                return await call_provider_json(name, data, timeout)
+            except Exception as e2:
+                logger.warning(f"{name} retry after 401 failed: {e2}")
+                return None
+        if code in (400, 413, 422):
+            # payload великоват -> режем вдвое агрессивнее и повторяем один раз
+            try:
+                return await call_provider_json(name, data, timeout, max_msg=MAX_MSG_CHARS // 2, max_total=MAX_TOTAL_CHARS // 2)
+            except Exception as e2:
+                logger.warning(f"{name} retry after {code} failed: {e2}")
+                return None
+        if code == 429:
+            await asyncio.sleep(1.5)
+            return None
+        return None
+    except Exception as e:
+        logger.warning(f"Provider {name} failed: {e}")
+        return None
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        is_stream = data.get("stream", False)
+        timeout = float(data.get("timeout", 180.0))
+        order = ORDER_CODE if is_code_request(data.get("messages", [])) else ORDER_CHAT
+
+        if is_stream:
+            for name in order:
+                if not PROVIDERS[name]["key"]:
+                    continue
+                for attempt in range(2):
+                    mm = MAX_MSG_CHARS if attempt == 0 else MAX_MSG_CHARS // 2
+                    mt = MAX_TOTAL_CHARS if attempt == 0 else MAX_TOTAL_CHARS // 2
+                    try:
+                        headers, work = await prepare_payload_and_headers(name, data, mm, mt)
+                        client = httpx.AsyncClient(verify=False, timeout=httpx.Timeout(timeout, read=timeout, connect=30.0))
+                        resp = await client.send(client.build_request("POST", PROVIDERS[name]["url"], headers=headers, json=work), stream=True)
+                        if resp.status_code >= 400:
+                            sc = resp.status_code
+                            await resp.aclose()
+                            await client.aclose()
+                            if sc == 401 and name == "gigachat":
+                                await get_gigachat_token(force=True)
+                            if sc in (400, 413, 422) and attempt == 0:
+                                continue  # повторить с меньшими лимитами
+                            raise httpx.HTTPStatusError(f"HTTP {sc}", request=resp.request, response=resp)
+                        async def stream_gen(r, c):
+                            try:
+                                async for chunk in r.aiter_lines():
+                                    if chunk:
+                                        yield f"{chunk}\n\n"
+                            finally:
+                                await r.aclose()
+                                await c.aclose()
+                        return StreamingResponse(stream_gen(resp, client), media_type="text/event-stream")
+                    except Exception as e:
+                        logger.warning(f"[stream] {name} attempt {attempt} failed: {e}")
+                        continue
+            # все провайдеры упали -> отдаём SSE-заглушку, а не красный 503
+            async def fb_gen():
+                payload = {"id": "chatcmpl-fallback", "object": "chat.completion.chunk", "created": int(time.time()), "model": "Zinaida-Router",
+                           "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Провайдеры сейчас перегружены. Повтори запрос через минуту."}, "finish_reason": None}]}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                payload["choices"][0]["delta"] = {}
+                payload["choices"][0]["finish_reason"] = "stop"
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(fb_gen(), media_type="text/event-stream")
+
+        # НЕ-стрим путь
+        for name in order:
+            if not PROVIDERS[name]["key"]:
+                continue
+            result = await try_provider_with_healing(name, data, timeout)
+            if result is not None:
+                return JSONResponse(result)
+        # все провайдеры упали -> корректный ответ вместо 503
+        logger.error("All providers failed -> returning graceful fallback")
+        return JSONResponse(_fallback_response())
+    except Exception as e:
+        logger.error(f"Router crash: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/v1/models")
+async def list_models():
+    return {"object": "list", "data": [{"id": "Zinaida-Router", "object": "model", "owned_by": "local"}]}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "port": 8002, "max_msg_chars": MAX_MSG_CHARS, "max_total_chars": MAX_TOTAL_CHARS}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8002, log_level="info")

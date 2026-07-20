@@ -1,0 +1,126 @@
+"""Grigoriy Router — code/speed priority"""
+import os, json, time, uuid, requests, urllib3
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Optional
+import logging
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging.basicConfig(filename="/opt/zinaida/logs/grigoriy_router.log", level=logging.INFO,
+                    format="%(asctime)s [GRIGORIY] %(message)s")
+log = logging.getLogger("grigoriy")
+
+KEYS_FILE = "/opt/zinaida/sandbox/configs/api_keys.json"
+CONNECT_TIMEOUT = 5
+READ_TIMEOUT = 15
+CB_WINDOW = 300
+CB_THRESHOLD = 3
+
+app = FastAPI()
+UNHEALTHY = {}
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    model: str
+    messages: List[Message]
+    max_tokens: Optional[int] = 1024
+    temperature: Optional[float] = 0.7
+
+def load_key(key_name):
+    try:
+        with open(KEYS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        keys = data.get("grigoriy_keys", data.get("zinaida_keys", {}))
+        return keys.get(key_name, "")
+    except Exception as e:
+        log.error(f"load_key failed: {e}")
+        return ""
+
+# === ЦЕПОЧКА ПРИОРИТЕТОВ ДЛЯ ГРИГОРИЯ (code/speed) ===
+PROVIDERS = [
+    {"name": "github_gpt41", "url": "https://models.inference.ai.azure.com/chat/completions", "model": "gpt-4.1", "key_name": "github_gpt41", "headers_extra": {}},
+    {"name": "ollama_ministral", "url": "https://ollama.com/v1/chat/completions", "model": "ministral-3:3b", "key_name": "ollama_2", "headers_extra": {}},
+    {"name": "github_llama", "url": "https://models.inference.ai.azure.com/chat/completions", "model": "llama-3.3-70b-instruct", "key_name": "github_gpt41", "headers_extra": {}},
+    {"name": "mistral", "url": "https://api.mistral.ai/v1/chat/completions", "model": "mistral-large-latest", "key_name": "mistral_large", "headers_extra": {}},
+    {"name": "or_mistral_small", "url": "https://openrouter.ai/api/v1/chat/completions", "model": "mistralai/mistral-small-3.2-24b-instruct:free", "key_name": "openrouter_qwen25_coder_free", "headers_extra": {"HTTP-Referer": "https://zinaida.app", "X-Title": "Zinaida"}},
+    {"name": "or_qwen3_32b", "url": "https://openrouter.ai/api/v1/chat/completions", "model": "qwen/qwen3-32b:free", "key_name": "openrouter_qwen25_coder_free", "headers_extra": {"HTTP-Referer": "https://zinaida.app", "X-Title": "Zinaida"}},
+    {"name": "or_kimi_dev", "url": "https://openrouter.ai/api/v1/chat/completions", "model": "moonshotai/kimi-dev-72b:free", "key_name": "openrouter_qwen25_coder_free", "headers_extra": {"HTTP-Referer": "https://zinaida.app", "X-Title": "Zinaida"}},
+]
+
+def is_healthy(name):
+    if name not in UNHEALTHY:
+        return True
+    if time.time() - UNHEALTHY[name] > CB_WINDOW:
+        del UNHEALTHY[name]
+        return True
+    return False
+
+def mark_unhealthy(name):
+    UNHEALTHY[name] = UNHEALTHY.get(name, time.time())
+
+def call_provider(provider, messages):
+    api_key = load_key(provider["key_name"])
+    if not api_key:
+        raise ValueError(f"No key for {provider['name']}")
+    
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", **provider["headers_extra"]}
+    payload = {
+        "model": provider["model"],
+        "messages": [m.model_dump() if hasattr(m, "model_dump") else m for m in messages],
+        "max_tokens": 1024,
+        "temperature": 0.7,
+        "stream": False
+    }
+    resp = requests.post(provider["url"], headers=headers, json=payload,
+                        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        raise ValueError("Empty content")
+    return content
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatRequest):
+    trace_id = str(uuid.uuid4())[:8]
+    start = time.time()
+    if req.messages and req.messages[0].role != "system":
+        req.messages.insert(0, Message(role="system", content="Ты — Григорий, кодер и исполнитель. Пиши код быстро и точно."))
+    log.info(f"[{trace_id}] Incoming request")
+    
+    for prov in PROVIDERS:
+        if not is_healthy(prov["name"]):
+            log.info(f"[{trace_id}] Skipping {prov['name']} (CB)")
+            continue
+        try:
+            log.info(f"[{trace_id}] Trying {prov['name']}...")
+            result = call_provider(prov, req.messages)
+            latency = round(time.time() - start, 2)
+            log.info(f"[{trace_id}] Success via {prov['name']} in {latency}s")
+            if prov["name"] in UNHEALTHY:
+                del UNHEALTHY[prov["name"]]
+            return JSONResponse({
+                "id": f"chatcmpl-{trace_id}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": prov["model"],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": result}, "finish_reason": "stop"}]
+            })
+        except Exception as e:
+            log.warning(f"[{trace_id}] {prov['name']} failed: {e}")
+            mark_unhealthy(prov["name"])
+    
+    log.error(f"[{trace_id}] All providers failed")
+    return JSONResponse(status_code=503, content={"error": {"message": "All providers failed", "code": 503}})
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "agent": "grigoriy", "providers": len(PROVIDERS), "ts": time.time()}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8003, log_level="info")

@@ -1,0 +1,218 @@
+[
+ {
+  "timestamp": "2026-07-16T13:24:33",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 4,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T14:01:47",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 4,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T14:11:43",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 14,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T16:28:05",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 4,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T16:43:52",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 4,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T16:44:25",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 14,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T16:56:20",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 4,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T16:56:28",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 4,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T17:10:33",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 4,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-16T19:39:53",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 5,
+  "completion_tokens": 6,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:14:01",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 15,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:30:09",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 15,
+  "completion_tokens": 10,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:30:10",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 20,
+  "completion_tokens": 100,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:30:58",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 16,
+  "completion_tokens": 2,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:34:20",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 15,
+  "completion_tokens": 10,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:34:21",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 20,
+  "completion_tokens": 100,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:38:11",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 19,
+  "completion_tokens": 23,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:38:34",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 21,
+  "completion_tokens": 50,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:39:18",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 19,
+  "completion_tokens": 15,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:39:52",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 20,
+  "completion_tokens": 25,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T07:57:44",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 15,
+  "completion_tokens": 5,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T08:04:06",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 5,
+  "completion_tokens": 14,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T08:04:08",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 18,
+  "completion_tokens": 30,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-17T08:05:08",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 19,
+  "completion_tokens": 8,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-19T15:48:15",
+  "provider": "mistral",
+  "model": "mistral-large-latest",
+  "prompt_tokens": 10,
+  "completion_tokens": 2,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-19T15:48:45",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 14,
+  "completion_tokens": 4,
+  "cost_usd": 0.0
+ },
+ {
+  "timestamp": "2026-07-19T15:48:54",
+  "provider": "ollama",
+  "model": "gemma4:31b",
+  "prompt_tokens": 14,
+  "completion_tokens": 4,
+  "cost_usd": 0.0
+ }
+]

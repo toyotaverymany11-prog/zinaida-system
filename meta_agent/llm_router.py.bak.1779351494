@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+import requests, time, logging, json, os
+from typing import List, Dict, Optional
+from datetime import timedelta
+from collections import defaultdict
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ROUTER] %(message)s")
+logger = logging.getLogger(__name__)
+
+METRICS_LOG = "/opt/zinaida/logs/router_metrics.jsonl"
+os.makedirs(os.path.dirname(METRICS_LOG), exist_ok=True)
+
+class MetricsLogger:
+    @staticmethod
+    def log(model: str, status: str, latency_ms: int, tokens: int = 0):
+        try:
+            entry = {"ts": time.time(), "model": model, "status": status, "latency_ms": latency_ms, "tokens": tokens}
+            with open(METRICS_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"Metrics write failed: {e}")
+
+PRIORITY_MODELS = [
+    "deepseek/deepseek-v4-flash:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free"
+]
+
+CACHE_TTL = 600
+CB_THRESHOLD = 3
+CB_WINDOW_SEC = 300
+CB_COOLDOWN_SEC = 600
+MAX_RETRIES = 2
+BACKOFF_BASE = 2
+
+class CircuitBreaker:
+    def __init__(self):
+        self.threshold = CB_THRESHOLD
+        self.window = timedelta(seconds=CB_WINDOW_SEC)
+        self.cooldown = timedelta(seconds=CB_COOLDOWN_SEC)
+        self.failures: Dict[str, List[float]] = defaultdict(list)
+        self.open_until: Dict[str, float] = {}
+
+    def is_open(self, model_id: str) -> bool:
+        now = time.time()
+        if model_id in self.open_until and now < self.open_until[model_id]:
+            return True
+        if model_id in self.open_until:
+            del self.open_until[model_id]
+        self.failures[model_id] = [t for t in self.failures[model_id] if now - t < self.window.total_seconds()]
+        if len(self.failures[model_id]) >= self.threshold:
+            self.open_until[model_id] = now + self.cooldown.total_seconds()
+            logger.warning(f"🔌 Circuit OPEN for {model_id}")
+            return True
+        return False
+
+    def record_failure(self, model_id: str):
+        self.failures[model_id].append(time.time())
+
+    def record_success(self, model_id: str):
+        if model_id in self.failures: self.failures[model_id] = []
+        if model_id in self.open_until: del self.open_until[model_id]
+
+class DynamicOpenRouterPool:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self._cache: List[str] = []
+        self._last_update: float = 0
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://zinaida.app",
+            "X-Title": "Zinaida",
+            "Content-Type": "application/json"
+        }
+
+    def _fetch_free(self) -> List[str]:
+        try:
+            r = requests.get("https://openrouter.ai/api/v1/models", headers=self._headers, timeout=10)
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                return [m["id"] for m in data if ":free" in m.get("id", "")]
+        except Exception as e:
+            logger.warning(f"OpenRouter fetch failed: {e}")
+        return []
+
+    def get_models(self) -> List[str]:
+        now = time.time()
+        if now - self._last_update > CACHE_TTL or not self._cache:
+            raw = self._fetch_free()
+            prioritized = [m for m in PRIORITY_MODELS if m in raw]
+            others = [m for m in raw if m not in PRIORITY_MODELS]
+            self._cache = prioritized + others
+            self._last_update = now
+            logger.info(f"🔄 Pool refreshed: {len(self._cache)} models. Priority: {self._cache[:4] if self._cache else 'none'}")
+        return self._cache
+
+class UnifiedRouter:
+    def __init__(self, config_path="/opt/zinaida/sandbox/configs/api_keys.json"):
+        try:
+            with open(config_path) as f: keys = json.load(f)
+        except Exception as e:
+            logger.error(f"Keys load failed: {e}"); keys = {}
+        zk = keys.get("zinaida_keys", {})
+        gk = keys.get("grigoriy_keys", {})
+
+        or_key = zk.get("openrouter_qwen25_coder_free","") or gk.get("openrouter_qwen32b_free","")
+        self.or_pool = DynamicOpenRouterPool(or_key) if or_key else None
+        self.cb = CircuitBreaker()
+
+        self.static_providers = [
+            {"name":"github_llama33_70b","url":"https://models.inference.ai.azure.com/chat/completions","key":gk.get("github_llama33_70b",""),"model":"llama-3.3-70b-instruct","timeout":15},
+            {"name":"github_gpt41_mini","url":"https://models.inference.ai.azure.com/chat/completions","key":zk.get("github_gpt41_mini",""),"model":"gpt-4.1-mini","timeout":15},
+            {"name":"ollama_gemma4_31b","url":"https://ollama.com/v1/chat/completions","key":zk.get("ollama_1",""),"model":"gemma4:31b","timeout":20},
+            {"name":"zhipu_glm4_flash","url":"https://open.bigmodel.cn/api/paas/v4/chat/completions","key":zk.get("zhipu_glm4_flash",""),"model":"glm-4-flash","timeout":25},
+            {"name":"mistral_small","url":"https://api.mistral.ai/v1/chat/completions","key":zk.get("mistral_large",""),"model":"mistral-small-latest","timeout":20}
+        ]
+
+    def _call_provider(self, url: str, headers: dict, payload: dict, timeout: int, model_id: str) -> Optional[dict]:
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                start = time.time()
+                r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+                latency = int((time.time() - start) * 1000)
+                if r.status_code == 200:
+                    self.cb.record_success(model_id)
+                    data = r.json()
+                    tokens = data.get("usage",{}).get("total_tokens",0)
+                    MetricsLogger.log(model_id, "success", latency, tokens)
+                    return data
+                elif r.status_code in (429, 502, 503, 504):
+                    self.cb.record_failure(model_id)
+                    MetricsLogger.log(model_id, f"http_{r.status_code}", latency)
+                    if attempt < MAX_RETRIES:
+                        wait = BACKOFF_BASE ** attempt
+                        logger.info(f"⏳ {model_id} → {r.status_code}, retry in {wait}s")
+                        time.sleep(wait)
+                        continue
+                else:
+                    self.cb.record_failure(model_id)
+                    MetricsLogger.log(model_id, f"http_{r.status_code}", latency)
+            except requests.exceptions.Timeout:
+                self.cb.record_failure(model_id)
+                MetricsLogger.log(model_id, "timeout", timeout*1000)
+            except Exception as e:
+                self.cb.record_failure(model_id)
+                MetricsLogger.log(model_id, "error", 0)
+                logger.debug(f"{model_id} exception: {e}")
+            break
+        return None
+
+    def route(self, messages: List[Dict], **kwargs) -> Dict:
+        payload = {**kwargs, "messages": messages}
+
+        if self.or_pool:
+            for model_id in self.or_pool.get_models():
+                if self.cb.is_open(model_id): continue
+                headers = {"Authorization": f"Bearer {self.or_pool.api_key}", "HTTP-Referer": "https://zinaida.app", "X-Title": "Zinaida", "Content-Type": "application/json"}
+                timeout = 45 if any(x in model_id for x in ["405b","80b","70b","v4"]) else 30
+                res = self._call_provider("https://openrouter.ai/api/v1/chat/completions", headers, {**payload, "model": model_id}, timeout=timeout, model_id=model_id)
+                if res: return res
+
+        for p in self.static_providers:
+            if not p["key"] or self.cb.is_open(p["name"]): continue
+            headers = {"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"}
+            res = self._call_provider(p["url"], headers, {**payload, "model": p["model"]}, timeout=p["timeout"], model_id=p["name"])
+            if res: return res
+
+        logger.error("❌ All tiers exhausted. Returning safe fallback.")
+        MetricsLogger.log("router-fallback", "fallback", 0)
+        return {
+            "id": "router-fallback", "object": "chat.completion", "created": int(time.time()),
+            "model": "router-fallback",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "⚠️ Все провайдеры временно перегружены. Повторите запрос через 30 секунд."}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+
+router = UnifiedRouter()

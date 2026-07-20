@@ -1,0 +1,977 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+ ZINAIDA SMART ROUTER v4.0  -  Gemini-First + DeepSeek Fallback
+================================================================================
+Порт: 8002  (эндпоинт /v1/chat/completions, /v1/models, /health, /status)
+
+FALLBACK CHAIN (ПРАВИЛЬНАЯ):
+    1. Gemini 2.0 Flash (OpenRouter бесплатный) - google/gemini-2.0-flash-exp:free
+    2. Другие бесплатные OpenRouter модели
+    3. DeepSeek V4 Flash (платный, при затыке) - deepseek-chat
+    4. DeepSeek V4 Pro (платный, для креатива) - deepseek-reasoner
+    5. GitHub Models (резерв) - gpt-4.1-mini
+
+ANTI-LOOPING: presence_penalty=0.3, frequency_penalty=0.2
+КОНТЕКСТ: до 120k токенов для DeepSeek/Gemini
+ЛОГИРОВАНИЕ: стоимость в /opt/zinaida/shared_memory/cost_log.json
+
+Автор: v4.0, июль 2026. Совместим по API с v1 OpenAI.
+================================================================================
+"""
+
+import sys, os, json, time, uuid, logging, asyncio, warnings, base64, copy
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+import uvicorn
+import httpx
+
+warnings.filterwarnings("ignore")
+sys.path.insert(0, str(Path(__file__).parent))
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ROUTER] %(message)s")
+logger = logging.getLogger("zinaida_router")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+app = FastAPI(title="Zinaida Smart Router v4.0")
+
+# ============================================================================
+# 1. КОНФИГУРАЦИЯ
+# ============================================================================
+ENV_PATH = Path("/opt/zinaida/.env")
+META_ENV_PATH = Path("/opt/zinaida/meta_agent/.env")
+COST_LOG_PATH = Path("/opt/zinaida/shared_memory/cost_log.json")
+
+def load_env():
+    for env_path in [ENV_PATH, META_ENV_PATH]:
+        if env_path.exists():
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, _, v = line.partition("=")
+                        os.environ.setdefault(k.strip(), v.strip())
+load_env()
+
+def _keys(*names) -> List[str]:
+    out, seen = [], set()
+    for n in names:
+        v = (os.getenv(n, "") or "").strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+# --- Лимиты ---
+MAX_MSG_CHARS   = int(os.getenv("ROUTER_MAX_MSG_CHARS", "8000"))
+MAX_TOTAL_CHARS = int(os.getenv("ROUTER_MAX_TOTAL_CHARS", "100000"))  # ~120k токенов
+
+# --- Тайминги ---
+CONNECT_TIMEOUT   = float(os.getenv("ROUTER_CONNECT_TIMEOUT", "4.0"))
+GEN_READ_TIMEOUT  = float(os.getenv("ROUTER_GEN_TIMEOUT", "180.0"))
+HEALTH_TIMEOUT    = float(os.getenv("ROUTER_HEALTH_TIMEOUT", "10.0"))
+DEAD_COOLDOWN     = int(os.getenv("ROUTER_DEAD_COOLDOWN", "120"))
+MONITOR_INTERVAL  = int(os.getenv("ROUTER_MONITOR_INTERVAL", "15"))
+
+# --- Стоимость моделей ($ / 1M токенов) ---
+MODEL_PRICING = {
+    "deepseek-chat":       {"input": 0.27, "output": 1.10},
+    "deepseek-reasoner":   {"input": 0.55, "output": 2.19},
+    "gpt-4.1-mini":        {"input": 0.40, "output": 1.60},
+    "mistral-small-latest": {"input": 0.10, "output": 0.30},
+}
+
+# ============================================================================
+# 2. ПРОВАЙДЕРЫ
+# ============================================================================
+PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "openrouter": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "keys": _keys("OPENROUTER_API_KEY_2", "OPENROUTER_API_KEY", "OPENROUTER_KEY"),
+        "model": "google/gemini-2.0-flash-exp:free",
+        "kind": "openrouter",
+        "max_total": 100000,
+        "paid": False,
+    },
+    "deepseek_flash": {
+        "url": "https://api.deepseek.com/v1/chat/completions",
+        "keys": _keys("DEEPSEEK_API_KEY"),
+        "model": "deepseek-v4-flash",
+        "kind": "openai",
+        "max_total": 100000,
+        "paid": True,
+    },
+    "deepseek_pro": {
+        "url": "https://api.deepseek.com/v1/chat/completions",
+        "keys": _keys("DEEPSEEK_API_KEY"),
+        "model": "deepseek-v4-pro",
+        "kind": "openai",
+        "max_total": 100000,
+        "paid": True,
+    },
+    "github": {
+        "url": "https://models.github.ai/inference/chat/completions",
+        "keys": _keys("GITHUB_TOKEN", "GITHUB_TOKEN_2"),
+        "model": "gpt-4.1-mini",
+        "kind": "openai",
+        "max_total": 18000,
+        "paid": False,
+    },
+    "mistral": {
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "keys": _keys("MISTRAL_API_KEY", "MISTRAL_API_KEY_2", "MISTRAL_API_KEY_3"),
+        "model": "mistral-large-latest",
+        "kind": "mistral",
+        "max_total": 45000,
+        "paid": False,
+    },
+    "ollama": {
+        "url": "https://ollama.com/v1/chat/completions",
+        "keys": _keys("OLLAMA_API_KEY", "OLLAMA_API_KEY_2", "GREG_OLLAMA_KEY"),
+        "model": "gemma3:4b",
+        "kind": "openai",
+        "max_total": 30000,
+        "paid": False,
+    },
+    "gigachat": {
+        "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+        "keys": ["oauth"],
+        "model": os.getenv("GIGACHAT_MODEL", "GigaChat"),
+        "kind": "gigachat",
+        "max_total": 40000,
+        "paid": False,
+    },
+    "zhipu": {
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "keys": _keys("ZHIPU_API_KEY"),
+        "model": "glm-4-flash",
+        "kind": "openai",
+        "max_total": 40000,
+        "paid": False,
+    },
+}
+
+# ПРАВИЛЬНАЯ ЦЕПОЧКА FALLBACK:
+# 1) DeepSeek Flash (единственный рабочий провайдер)
+# БЕСПЛАТНЫЕ ПЕРВЫМИ: Mistral (3 ключа) → DeepSeek Flash (платный, только если бесплатные упали)
+# Мёртвые провайдеры (gigachat 402, openrouter 403, zhipu 0 ключей) — удалены
+FREE_PROVIDERS = {"mistral", "github", "ollama"}
+ORDER_CHAT = ["mistral", "github", "ollama", "deepseek_flash"]
+ORDER_CODE = ["mistral", "github", "ollama", "deepseek_flash"]
+ORDER_CREATIVE = ["mistral", "github", "ollama", "deepseek_flash"]
+
+ALLOWED_KEYS = {"model", "messages", "stream", "max_tokens", "temperature", "top_p",
+                "frequency_penalty", "presence_penalty", "stop", "user", "tools",
+                "tool_choice", "parallel_tool_calls", "response_format"}
+
+# ============================================================================
+# 3. СОСТОЯНИЕ ПРОВАЙДЕРОВ
+# ============================================================================
+_state: Dict[str, Dict[str, Any]] = {
+    name: {"alive": True, "dead_until": 0.0, "last_error": "", "last_ok": 0.0,
+           "last_latency_ms": 0, "ok_count": 0, "fail_count": 0}
+    for name in PROVIDERS
+}
+
+def _mark_dead(name: str, reason: str, cooldown: int = DEAD_COOLDOWN):
+    st = _state[name]
+    st["alive"] = False
+    st["dead_until"] = time.time() + cooldown
+    st["last_error"] = reason
+    st["fail_count"] += 1
+    logger.warning("PROVIDER DOWN: %s помечен dead на %ss (%s)", name, cooldown, reason)
+
+def _mark_alive(name: str, latency_ms: int = 0):
+    st = _state[name]
+    was_dead = not st["alive"]
+    st["alive"] = True
+    st["dead_until"] = 0.0
+    st["last_ok"] = time.time()
+    st["last_latency_ms"] = latency_ms
+    st["ok_count"] += 1
+    if was_dead:
+        logger.info("PROVIDER RECOVERED: %s снова в ротации", name)
+
+def _is_available(name: str) -> bool:
+    """Провайдер считается живым ТОЛЬКО если реально прошёл healthcheck.
+    Никакого автовоскрешения - без подтверждения Alive не отдаём."""
+    if not PROVIDERS[name]["keys"]:
+        return False
+    st = _state[name]
+    return st["alive"]
+
+# ============================================================================
+# 4. ЛОГИРОВАНИЕ СТОИМОСТИ
+# ============================================================================
+def _log_cost(model: str, provider_name: str, prompt_tokens: int, completion_tokens: int):
+    """Записывает стоимость запроса в cost_log.json."""
+    try:
+        pricing = MODEL_PRICING.get(model, {"input": 0, "output": 0})
+        cost_usd = (prompt_tokens * pricing["input"] + completion_tokens * pricing["output"]) / 1_000_000
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "provider": provider_name,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cost_usd": round(cost_usd, 6),
+        }
+        COST_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Читаем существующий лог
+        entries = []
+        if COST_LOG_PATH.exists():
+            try:
+                with open(COST_LOG_PATH, "r") as f:
+                    entries = json.load(f)
+            except Exception:
+                entries = []
+        entries.append(entry)
+        # Держим последние 10000 записей
+        if len(entries) > 10000:
+            entries = entries[-10000:]
+        with open(COST_LOG_PATH, "w") as f:
+            json.dump(entries, f, ensure_ascii=False, indent=1)
+        if cost_usd > 0:
+            logger.info("COST: %s/%s - $%.6f (%d+%d tok)", provider_name, model, cost_usd, prompt_tokens, completion_tokens)
+    except Exception as e:
+        logger.warning("Cost logging failed: %s", e)
+
+# ============================================================================
+# 5. СЖАТИЕ КОНТЕНТА (умная компрессия старых сообщений)
+# ============================================================================
+def truncate_messages(messages, max_keep=30):
+    """Оставляем системные + последние max_keep реплик. Старые сообщения сжимаются в summary."""
+    if len(messages) <= max_keep + 2:
+        return messages
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    non_system = [m for m in messages if m.get("role") != "system"]
+    
+    # Если слишком много сообщений - делаем summary старых
+    if len(non_system) > max_keep:
+        old_msgs = non_system[:-max_keep]
+        recent = non_system[-max_keep:]
+        # Сжимаем старые в одно сообщение
+        old_summary_parts = []
+        for m in old_msgs[-6:]:  # последние 6 из старых для контекста
+            role = m.get("role", "?")
+            content = (m.get("content") or "")[:200]
+            if content:
+                old_summary_parts.append(f"[{role}]: {content}")
+        if old_summary_parts:
+            summary_text = "[СЖАТАЯ ИСТОРИЯ (" + str(len(old_msgs)) + " сообщений)]n" + "n".join(old_summary_parts)
+            system_msgs.append({"role": "system", "content": summary_text})
+    else:
+        recent = non_system
+    
+    while recent and recent[0].get("role") != "user":
+        recent.pop(0)
+    if not recent:
+        recent = non_system[-max_keep:]
+    return system_msgs + recent
+
+def _truncate_text(text, limit):
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    head = int(limit * 0.6)
+    tail = max(limit - head - 60, 200)
+    cut = len(text) - head - tail
+    return text[:head] + f"nn...[обрезано {cut} символов]...nn" + text[-tail:]
+
+def _content_to_str(c) -> str:
+    """Превращает content (строка, список, None) в строку.
+    Исправляет ошибку 'list' object has no attribute 'strip' при мультимодальных запросах."""
+    if c is None:
+        return ""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        # Мультимодальный контент: собираем текст из частей
+        parts = []
+        for part in c:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+        return " ".join(parts) if parts else json.dumps(c, ensure_ascii=False)
+    return str(c)
+
+
+def shrink_messages(messages, max_msg=MAX_MSG_CHARS, max_total=MAX_TOTAL_CHARS):
+    out = []
+    for m in messages:
+        m = dict(m)
+        c = m.get("content")
+        # Принудительно конвертируем content в строку
+        m["content"] = _content_to_str(c)
+        if m.get("role") != "system":
+            m["content"] = _truncate_text(m["content"], max_msg)
+        out.append(m)
+
+    def total(msgs):
+        return sum(len(x.get("content") or "") for x in msgs if isinstance(x.get("content"), str))
+
+    limit = max_msg
+    while total(out) > max_total and limit > 600:
+        limit = int(limit * 0.6)
+        for m in out:
+            if isinstance(m.get("content"), str) and m.get("role") != "system":
+                m["content"] = _truncate_text(m["content"], limit)
+    if total(out) > max_total:
+        sys_limit = max(int(max_total * 0.5), 3000)
+        for m in out:
+            if isinstance(m.get("content"), str) and m.get("role") == "system":
+                m["content"] = _truncate_text(m["content"], sys_limit)
+    return out
+
+def sanitize_payload(payload):
+    return {k: v for k, v in payload.items() if k in ALLOWED_KEYS}
+
+# ============================================================================
+# 6. GIGACHAT: OAuth-токен
+# ============================================================================
+def _fix_b64_padding(s: str) -> str:
+    s = s.strip()
+    missing = len(s) % 4
+    if missing:
+        s += "=" * (4 - missing)
+    return s
+
+_gc_token = {"value": None, "exp": 0.0}
+
+async def get_gigachat_token(force=False) -> Optional[str]:
+    now = time.time()
+    if not force and _gc_token["value"] and now < _gc_token["exp"]:
+        return _gc_token["value"]
+    try:
+        auth_key = os.getenv("GIGACHAT_AUTH_KEY", "").strip()
+        if auth_key:
+            b64_auth = _fix_b64_padding(auth_key)
+        else:
+            cid = os.getenv("GIGACHAT_CLIENT_ID", "")
+            csec = os.getenv("GIGACHAT_CLIENT_SECRET", "")
+            if not cid or not csec:
+                return None
+            b64_auth = base64.b64encode(f"{cid}:{csec}".encode()).decode()
+        async with httpx.AsyncClient(verify=False, timeout=HEALTH_TIMEOUT) as client:
+            resp = await client.post(
+                "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+                headers={"Authorization": f"Basic {b64_auth}", "RqUID": str(uuid.uuid4()),
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                data={"scope": "GIGACHAT_API_PERS"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            tok = data.get("access_token")
+            exp_ms = data.get("expires_at", 0)
+            exp = (exp_ms / 1000.0) if exp_ms else (now + 1800)
+            _gc_token["value"] = tok
+            _gc_token["exp"] = exp - 300
+            return tok
+    except Exception as e:
+        logger.warning("GigaChat token failed: %s", e)
+        return None
+
+def _gigachat_clean_messages(messages):
+    cleaned = []
+    system_taken = False
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False) if content is not None else ""
+        if role == "system":
+            if system_taken:
+                role = "user"
+            else:
+                system_taken = True
+        if role == "tool":
+            role = "user"
+        if not content.strip():
+            continue
+        if cleaned and cleaned[-1]["role"] == role and role != "system":
+            cleaned[-1]["content"] += "nn" + content
+        else:
+            cleaned.append({"role": role, "content": content})
+    if cleaned and cleaned[-1]["role"] == "assistant":
+        cleaned.append({"role": "user", "content": "Продолжай."})
+    return cleaned
+
+# ============================================================================
+# 7. OPENROUTER: предпочитаем Gemini, потом другие бесплатные
+# ============================================================================
+_or_free = {"models": [], "exp": 0.0}
+
+PREFERRED_FREE_MODELS = [
+    "google/gemini-2.0-flash-exp:free",
+    "google/gemini-2.5-flash-preview-05-20",  # если появится бесплатным
+]
+
+async def get_openrouter_free_model() -> str:
+    now = time.time()
+    if _or_free["models"] and now < _or_free["exp"]:
+        return _or_free["models"][0]
+    keys = PROVIDERS["openrouter"]["keys"]
+    if not keys:
+        return PROVIDERS["openrouter"]["model"]
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=HEALTH_TIMEOUT) as client:
+            resp = await client.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {keys[0]}"},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            free = []
+            for m in data:
+                pr = m.get("pricing", {}) or {}
+                try:
+                    if float(pr.get("prompt", "1")) == 0.0 and float(pr.get("completion", "1")) == 0.0:
+                        free.append(m.get("id"))
+                except (ValueError, TypeError):
+                    continue
+            # Приоритет: Gemini > крупные модели > остальные
+            gemini_free = [x for x in free if "gemini" in x.lower()]
+            large_free = [x for x in free if any(k in x.lower() for k in
+                         ["llama-3.3", "llama-3.1-70", "qwen-2.5-72", "deepseek"]) and x not in gemini_free]
+            other_free = [x for x in free if x not in gemini_free and x not in large_free]
+            ordered = gemini_free + large_free + other_free
+            if ordered:
+                _or_free["models"] = ordered
+                _or_free["exp"] = now + 3600
+                logger.info("OpenRouter: найдено %d бесплатных моделей, выбрана %s (Gemini-first)",
+                            len(ordered), ordered[0])
+                return ordered[0]
+    except Exception as e:
+        logger.warning("OpenRouter free-model discovery failed: %s", e)
+    return PROVIDERS["openrouter"]["model"]
+
+# ============================================================================
+# 8. ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА (для выбора fallback chain)
+# ============================================================================
+def is_code_request(messages) -> bool:
+    if not messages:
+        return False
+    last = (messages[-1].get("content") or "")
+    if not isinstance(last, str):
+        return False
+    last = last.lower()
+    kw = ["код", "скрипт", "python", "html", "css", "javascript", "function",
+          "def ", "class ", "напиши программу", "code", "script", "api", "json", "sql"]
+    return any(k in last for k in kw)
+
+def is_creative_request(messages) -> bool:
+    if not messages:
+        return False
+    last = (messages[-1].get("content") or "")
+    if not isinstance(last, str):
+        return False
+    last = last.lower()
+    kw = ["напиши пост", "контент", "статью", "креатив", "текст", "рассказ", "история",
+          "стратеги", "анализ", "разбор", "глубок", "creative", "write", "essay", "story"]
+    return any(k in last for k in kw)
+
+# ============================================================================
+# 9. ПОДГОТОВКА PAYLOAD + ЗАГОЛОВКОВ
+# ============================================================================
+async def prepare_payload_and_headers(name: str, key: str, payload: dict,
+                                      max_msg=MAX_MSG_CHARS, max_total=None):
+    p = PROVIDERS[name]
+    if max_total is None:
+        max_total = p.get("max_total", MAX_TOTAL_CHARS)
+    headers = {"Content-Type": "application/json"}
+    work = sanitize_payload(copy.deepcopy(payload))
+    msgs = truncate_messages(work.get("messages", []))
+    msgs = shrink_messages(msgs, max_msg=max_msg, max_total=max_total)
+    work["messages"] = msgs
+    work["model"] = p["model"]
+    kind = p["kind"]
+
+    if kind == "openrouter":
+        work["model"] = await get_openrouter_free_model()
+        headers["Authorization"] = f"Bearer {key}"
+        headers.update({"HTTP-Referer": "https://zinaida.local", "X-Title": "ZinaidaRouter"})
+    elif kind == "gigachat":
+        token = await get_gigachat_token()
+        if not token:
+            raise Exception("No GigaChat token")
+        headers["Authorization"] = f"Bearer {token}"
+        for bad in ("tools", "tool_choice", "parallel_tool_calls", "response_format"):
+            work.pop(bad, None)
+        work["messages"] = _gigachat_clean_messages(work["messages"])
+        if "temperature" in work:
+            try: work["temperature"] = min(max(float(work["temperature"]), 0.01), 2.0)
+            except Exception: work.pop("temperature", None)
+    elif kind == "mistral":
+        headers["Authorization"] = f"Bearer {key}"
+        filtered = []
+        for msg in work.get("messages", []):
+            if msg.get("role") == "system" and len(filtered) > 0:
+                continue
+            filtered.append(msg)
+        work["messages"] = filtered
+    elif kind == "openai":
+        headers["Authorization"] = f"Bearer {key}"
+        if name == "github":
+            work["model"] = "gpt-4.1-mini"
+    else:
+        headers["Authorization"] = f"Bearer {key}"
+
+    # Anti-looping: штрафы за повторы
+    if work.get("presence_penalty", 0) == 0 and kind != "gigachat":
+        work["presence_penalty"] = 0.3
+    if work.get("frequency_penalty", 0) == 0 and kind != "gigachat":
+        work["frequency_penalty"] = 0.2
+    return headers, work
+
+# ============================================================================
+# 10. ВЫЗОВ ПРОВАЙДЕРА С РОТАЦИЕЙ КЛЮЧЕЙ
+# ============================================================================
+def _status_of(exc):
+    resp = getattr(exc, "response", None)
+    return resp.status_code if resp is not None else None
+
+async def _post_once(name, key, data, timeout, max_msg, max_total):
+    p = PROVIDERS[name]
+    headers, work = await prepare_payload_and_headers(name, key, data, max_msg, max_total)
+    async with httpx.AsyncClient(verify=False,
+                                 timeout=httpx.Timeout(timeout, read=timeout, connect=CONNECT_TIMEOUT)) as client:
+        resp = await client.post(p["url"], headers=headers, json=work)
+        resp.raise_for_status()
+        result = resp.json()
+        # Логируем стоимость
+        usage = result.get("usage", {})
+        if usage:
+            _log_cost(
+                model=result.get("model", work.get("model", "")),
+                provider_name=name,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+            )
+        return result
+
+async def try_provider(name, data, timeout) -> Optional[dict]:
+    p = PROVIDERS[name]
+    keys = p["keys"] if p["kind"] != "gigachat" else ["oauth"]
+    t0 = time.time()
+    for ki, key in enumerate(keys):
+        for attempt in range(3):  # 3 попытки с backoff
+            mm = MAX_MSG_CHARS if attempt == 0 else MAX_MSG_CHARS // 2
+            mt = p.get("max_total", MAX_TOTAL_CHARS) if attempt == 0 else p.get("max_total", MAX_TOTAL_CHARS) // 2
+            try:
+                result = await _post_once(name, key, data, timeout, mm, mt)
+                latency = int((time.time() - t0) * 1000)
+                _mark_alive(name, latency)
+                logger.info("OK <- %s (key#%d, attempt %d, %d ms)", name, ki + 1, attempt + 1, latency)
+                return result
+            except httpx.HTTPStatusError as e:
+                code = _status_of(e)
+                logger.warning("FAIL <- %s key#%d HTTP %s (attempt %d)", name, ki + 1, code, attempt + 1)
+                if code == 401 and name == "gigachat":
+                    await get_gigachat_token(force=True)
+                    continue
+                if code in (401, 403):
+                    break
+                if code == 429:
+                    # Rate limit - жди с backoff и ретрай
+                    wait = 1.0 * (2 ** attempt)  # 1s, 2s, 4s
+                    logger.info("RETRY <- %s key#%d 429 - жду %.1fs...", name, ki + 1, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                if code in (500, 502, 503, 504):
+                    # Server error - жди и ретрай
+                    wait = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s
+                    logger.info("RETRY <- %s key#%d HTTP %d - жду %.1fs...", name, ki + 1, code, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                if code in (400, 413, 422):
+                    if attempt == 0:
+                        continue
+                    break
+                break
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+                logger.warning("FAIL <- %s key#%d network: %s (attempt %d)", name, ki + 1, type(e).__name__, attempt + 1)
+                # Network error - жди и ретрай (кроме последней попытки)
+                if attempt < 2:
+                    wait = 0.5 * (2 ** attempt)
+                    logger.info("RETRY <- %s key#%d network - жду %.1fs...", name, ki + 1, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                break
+            except Exception as e:
+                logger.warning("FAIL <- %s key#%d error: %s (attempt %d)", name, ki + 1, e, attempt + 1)
+                break
+    _mark_dead(name, f"all keys failed")
+    return None
+
+# ============================================================================
+# 11. ОЧИСТКА REASONING ИЗ ОТВЕТОВ МОДЕЛИ
+# ============================================================================
+def _strip_reasoning_from_chunk(chunk: str):
+    """Удаляет reasoning_content/reasoning из SSE-чанка.
+    Если после удаления в дельте пусто — возвращает None (пропускаем чанк)."""
+    if chunk == "data: [DONE]":
+        return chunk
+    try:
+        data = json.loads(chunk[6:])
+        for ch in data.get("choices", []):
+            delta = ch.get("delta", {})
+            removed = delta.pop("reasoning_content", None) or delta.pop("reasoning", None)
+            if removed is not None and not delta.get("content"):
+                return None  # чанк только с reasoning — выкидываем
+        data = _sanitize_chunk_content(data)
+        return "data: " + json.dumps(data, ensure_ascii=False)
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return chunk
+
+
+def _sanitize_chunk_content(data: dict) -> dict:
+    """Заменяет запрещённые символы в контенте чанка.
+    Длинные тире, средние тире, многоточия, жирные точки."""
+    for ch in data.get("choices", []):
+        delta = ch.get("delta", {})
+        content = delta.get("content")
+        if content:
+            content = content.replace("\u2014", "-").replace("\u2013", "-")
+            content = content.replace("\u2026", ".")
+            for bullet in ["\u2022", "\u25CF", "\u25E6"]:
+                content = content.replace(bullet, "-")
+            delta["content"] = content
+    return data
+
+def _clean_reasoning_generator(agen):
+    """Оборачивает асинхронный генератор SSE-чанков, вырезая reasoning."""
+    async def wrapper(r, c):
+        try:
+            async for chunk in agen(r, c):
+                cleaned = _strip_reasoning_from_chunk(chunk)
+                if cleaned is not None:
+                    yield cleaned
+        except Exception as e:
+            logger.warning("REASONING-FILTER error: %s", e)
+    return wrapper
+
+def _strip_reasoning_from_response(result: dict) -> dict:
+    """Удаляет reasoning из не-streaming ответа модели + чистит пунктуацию."""
+    for ch in result.get("choices", []):
+        msg = ch.get("message", {})
+        msg.pop("reasoning", None)
+        msg.pop("reasoning_content", None)
+        content = msg.get("content")
+        if content:
+            content = content.replace("\u2014", "-").replace("\u2013", "-")
+            content = content.replace("\u2026", ".")
+            for bullet in ["\u2022", "\u25CF", "\u25E6"]:
+                content = content.replace(bullet, "-")
+            msg["content"] = content
+    return result
+
+# ============================================================================
+# 12. GRACEFUL FALLBACK
+# ============================================================================
+def _degraded_text() -> str:
+    dead = [n for n in PROVIDERS if not _is_available(n)]
+    alive = [n for n in PROVIDERS if _is_available(n)]
+    if dead:
+        # Мёртвые: без денег/ключа. Живые: перегружены прямо сейчас.
+        dead_str = ", ".join(dead)
+        alive_str = ", ".join(alive[:3]) if alive else "нет"
+        return (f"Провайдеры временно недоступны. Мёртвы: {dead_str}. "
+                f"Живы (но не ответили): {alive_str}. Автовосстановление запущено - повтори запрос.")
+    return "Провайдеры сейчас перегружены. Повтори запрос через минуту."
+
+def _fallback_response():
+    return {
+        "id": "chatcmpl-fallback", "object": "chat.completion",
+        "created": int(time.time()), "model": "Zinaida-Router",
+        "choices": [{"index": 0,
+                     "message": {"role": "assistant", "content": _degraded_text()},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+# ============================================================================
+# 12. HTTP-ЭНДПОИНТЫ
+# ============================================================================
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        is_stream = data.get("stream", False)
+        timeout = float(data.get("timeout", GEN_READ_TIMEOUT))
+        msgs = data.get("messages", [])
+        
+        # Выбор цепочки fallback по типу запроса
+        if is_creative_request(msgs):
+            base_order = ORDER_CREATIVE
+        elif is_code_request(msgs):
+            base_order = ORDER_CODE
+        else:
+            base_order = ORDER_CHAT
+        
+        # Если клиент явно запросил конкретную модель DeepSeek
+        requested_model = data.get("model", "")
+        if "deepseek-reasoner" in requested_model:
+            base_order = ["deepseek_pro"] + [x for x in base_order if x != "deepseek_pro"]
+        elif "deepseek-chat" in requested_model:
+            base_order = ["deepseek_flash"] + [x for x in base_order if x != "deepseek_flash"]
+            
+        order = [n for n in base_order if _is_available(n)] + \
+                [n for n in base_order if not _is_available(n) and PROVIDERS[n]["keys"]]
+
+        if is_stream:
+            # --- RACE-СТРИМИНГ: ТОЛЬКО БЕСПЛАТНЫЕ ПРОВАЙДЕРЫ ---
+            alive_order = [n for n in order if _is_available(n)]
+            if not alive_order:
+                alive_order = order  # если все формально мертвы - пробуем всех
+            
+            # Гонка только среди бесплатных. DeepSeek — не в гонке, только как fallback
+            free_race = [n for n in alive_order if n in FREE_PROVIDERS]
+            if not free_race:
+                free_race = alive_order[:1]  # если бесплатных нет — хотя бы одного
+            
+            race_pool = free_race[:2] if len(free_race) >= 2 else free_race[:1]
+            
+            # Флаг - первый ответивший уже отдаёт результат
+            _race_winner = None
+            
+            async def _stream_worker(name: str) -> Optional[tuple]:
+                """Пытаемся застримить от провайдера. Возвращает (StreamingResponse, None) или (None, error)."""
+                global _race_winner
+                p = PROVIDERS[name]
+                keys = p["keys"] if p["kind"] != "gigachat" else ["oauth"]
+                for ki, key in enumerate(keys):
+                    for attempt in range(2):
+                        mm = MAX_MSG_CHARS if attempt == 0 else MAX_MSG_CHARS // 2
+                        mt = p.get("max_total", MAX_TOTAL_CHARS) if attempt == 0 else p.get("max_total", MAX_TOTAL_CHARS) // 2
+                        t0 = time.time()
+                        try:
+                            headers, work = await prepare_payload_and_headers(name, key, data, mm, mt)
+                            client = httpx.AsyncClient(verify=False,
+                                        timeout=httpx.Timeout(timeout, read=timeout, connect=CONNECT_TIMEOUT))
+                            resp = await client.send(
+                                client.build_request("POST", p["url"], headers=headers, json=work),
+                                stream=True)
+                            if resp.status_code >= 400:
+                                sc = resp.status_code
+                                await resp.aclose(); await client.aclose()
+                                logger.warning("FAIL(stream) <- %s key#%d HTTP %s (attempt %d, %.1fs)",
+                                               name, ki + 1, sc, attempt + 1, time.time() - t0)
+                                if sc == 401 and name == "gigachat":
+                                    await get_gigachat_token(force=True)
+                                if sc in (400, 413, 422) and attempt == 0:
+                                    continue
+                                break
+                            _mark_alive(name)
+                            logger.info("OK(stream) <- %s key#%d (%.1fs)", name, ki + 1, time.time() - t0)
+                            
+                            # Этот воркер выиграл гонку - отдаём стрим
+                            async def stream_gen(r, c, n):
+                                try:
+                                    async for chunk in r.aiter_lines():
+                                        if chunk:
+                                            yield f"{chunk}nn"
+                                except Exception as e:
+                                    logger.warning("STREAM BROKEN: %s порвался mid-flight: %s", n, e)
+                                    # Если стрим порвался - это катастрофа, но хотя бы не падаем
+                                finally:
+                                    await r.aclose(); await c.aclose()
+                            return (name, client, resp)  # сигнал "я выиграл"
+                        except Exception as e:
+                            logger.warning("FAIL(stream) <- %s key#%d %s (attempt %d, %.1fs)",
+                                           name, ki + 1, type(e).__name__, attempt + 1, time.time() - t0)
+                            break
+                logger.warning("SKIP(stream) <- %s все попытки исчерпаны", name)
+                return None
+            
+            # Запускаем гонку
+            tasks = {}
+            for n in race_pool:
+                tasks[n] = asyncio.ensure_future(_stream_worker(n))
+            
+            winner = None
+            # Ждём первого успешного или всех неудач
+            while tasks:
+                done, pending = await asyncio.wait(tasks.values(), return_when=asyncio.FIRST_COMPLETED)
+                for d in done:
+                    result = d.result()
+                    if result is not None:
+                        winner_name, winner_client, winner_resp = result
+                        if winner is None:
+                            winner = (winner_name, winner_client, winner_resp)
+                            # Отменяем остальных, кто ещё бежит
+                            for pname, ptask in list(tasks.items()):
+                                if pname != winner_name and not ptask.done():
+                                    ptask.cancel()
+                    tasks = {n: t for n, t in tasks.items() if not t.done()}
+                if winner is not None:
+                    break
+            
+            if winner is not None:
+                name, client, resp = winner
+                logger.info("RACE WINNER: %s - отдаём стрим", name)
+                async def winner_stream(r, c):
+                    try:
+                        async for chunk in r.aiter_lines():
+                            if chunk:
+                                cleaned = _strip_reasoning_from_chunk(chunk)
+                                if cleaned is not None:
+                                    yield f"{cleaned}nn"
+                    except Exception as e:
+                        logger.warning("STREAM BROKEN mid-flight от %s: %s", name, e)
+                    finally:
+                        await r.aclose(); await c.aclose()
+                return StreamingResponse(winner_stream(resp, client), media_type="text/event-stream")
+            
+            # Все провайдеры из race упали - пробуем остальных (per-provider, не race)
+            logger.warning("RACE: оба провала (%s), пробую остальных по очереди", ", ".join(race_pool))
+            for name in [n for n in order if n not in race_pool]:
+                result = await _stream_worker(name)
+                if result is not None:
+                    n2, c2, r2 = result
+                    async def fallback_stream(r, c):
+                        try:
+                            async for chunk in r.aiter_lines():
+                                if chunk:
+                                    cleaned = _strip_reasoning_from_chunk(chunk)
+                                    if cleaned is not None:
+                                        yield f"{cleaned}nn"
+                        finally:
+                            await r.aclose(); await c.aclose()
+                    return StreamingResponse(fallback_stream(r2, c2), media_type="text/event-stream")
+            
+            # Fallback - ничего не сработало
+            logger.error("ВСЕ ПРОВАЙДЕРЫ УПАЛИ (stream) -> graceful fallback")
+            async def fb_gen():
+                payload = {"id": "chatcmpl-fallback", "object": "chat.completion.chunk",
+                           "created": int(time.time()), "model": "Zinaida-Router",
+                           "choices": [{"index": 0, "delta": {"role": "assistant", "content": _degraded_text()},
+                                        "finish_reason": None}]}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}nn"
+                payload["choices"][0]["delta"] = {}
+                payload["choices"][0]["finish_reason"] = "stop"
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}nn"
+                yield "data: [DONE]nn"
+            return StreamingResponse(fb_gen(), media_type="text/event-stream")
+
+        # НЕ-стрим путь
+        for name in order:
+            result = await try_provider(name, data, timeout)
+            if result is not None:
+                _strip_reasoning_from_response(result)
+                return JSONResponse(result)
+        logger.error("ВСЕ ПРОВАЙДЕРЫ УПАЛИ -> graceful fallback")
+        return JSONResponse(_fallback_response())
+    except Exception as e:
+        logger.error("Router crash: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/v1/models")
+async def list_models():
+    models = [
+        {"id": "Zinaida-Router", "object": "model", "owned_by": "local"},
+        {"id": "deepseek-chat", "object": "model", "owned_by": "deepseek"},
+        {"id": "deepseek-reasoner", "object": "model", "owned_by": "deepseek"},
+    ]
+    return {"object": "list", "data": models}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "port": 8002, "version": "4.0",
+            "max_msg_chars": MAX_MSG_CHARS, "max_total_chars": MAX_TOTAL_CHARS}
+
+@app.get("/status")
+async def status():
+    now = time.time()
+    providers = {}
+    for name, p in PROVIDERS.items():
+        st = _state[name]
+        providers[name] = {
+            "available": _is_available(name),
+            "keys": len(p["keys"]),
+            "model": p["model"],
+            "paid": p.get("paid", False),
+            "alive": st["alive"],
+            "dead_for_sec": max(0, int(st["dead_until"] - now)) if not st["alive"] else 0,
+            "last_error": st["last_error"],
+            "last_latency_ms": st["last_latency_ms"],
+            "ok_count": st["ok_count"],
+            "fail_count": st["fail_count"],
+        }
+    # Стоимость за сегодня
+    today_cost = 0.0
+    try:
+        if COST_LOG_PATH.exists():
+            with open(COST_LOG_PATH, "r") as f:
+                entries = json.load(f)
+            today = time.strftime("%Y-%m-%d")
+            today_cost = sum(e.get("cost_usd", 0) for e in entries if e.get("timestamp", "").startswith(today))
+    except Exception:
+        pass
+    return {
+        "router": "Zinaida Smart Router v4.0",
+        "fallback_order_chat": ORDER_CHAT,
+        "fallback_order_code": ORDER_CODE,
+        "fallback_order_creative": ORDER_CREATIVE,
+        "providers": providers,
+        "openrouter_free_model": _or_free["models"][0] if _or_free["models"] else None,
+        "today_cost_usd": round(today_cost, 4),
+    }
+
+# ============================================================================
+# 13. HEALTH-CHECK + ФОНОВЫЙ МОНИТОР
+# ============================================================================
+async def _probe(name: str) -> bool:
+    p = PROVIDERS[name]
+    keys = p["keys"] if p["kind"] != "gigachat" else ["oauth"]
+    if not keys:
+        return False
+    probe = {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 1, "stream": False}
+    t0 = time.time()
+    try:
+        headers, work = await prepare_payload_and_headers(name, keys[0], probe, 500, 2000)
+        async with httpx.AsyncClient(verify=False,
+                    timeout=httpx.Timeout(HEALTH_TIMEOUT, connect=CONNECT_TIMEOUT)) as client:
+            resp = await client.post(p["url"], headers=headers, json=work)
+            if resp.status_code < 300:
+                _mark_alive(name, int((time.time() - t0) * 1000))
+                return True
+            if resp.status_code == 429:
+                logger.info("HEALTH %s: 429 (лимит, но эндпоинт жив)", name)
+                return False
+            _mark_dead(name, f"health HTTP {resp.status_code}")
+            return False
+    except Exception as e:
+        _mark_dead(name, f"health {type(e).__name__}")
+        return False
+
+async def health_check_all(reason="startup"):
+    logger.info("HEALTH-CHECK (%s): проверяю провайдеров...", reason)
+    results = await asyncio.gather(*[_probe(n) for n in PROVIDERS], return_exceptions=True)
+    alive = [n for n, r in zip(PROVIDERS, results) if r is True]
+    logger.info("HEALTH-CHECK (%s): живы %d/%d -> %s",
+                reason, len(alive), len(PROVIDERS), ", ".join(alive) or "никого")
+
+async def background_monitor():
+    while True:
+        await asyncio.sleep(MONITOR_INTERVAL)
+        try:
+            await health_check_all(reason="monitor")
+            await get_openrouter_free_model()
+        except Exception as e:
+            logger.warning("monitor tick failed: %s", e)
+
+@app.on_event("startup")
+async def _on_startup():
+    logger.info("=" * 60)
+    logger.info("ZINAIDA SMART ROUTER v4.0 - Gemini-First + DeepSeek Fallback")
+    for name, p in PROVIDERS.items():
+        logger.info("  %-15s ключей=%d модель=%-30s платный=%s", name, len(p["keys"]), p["model"], p.get("paid", False))
+    logger.info("FALLBACK: %s", " → ".join(ORDER_CHAT))
+    logger.info("=" * 60)
+    asyncio.create_task(health_check_all(reason="startup"))
+    asyncio.create_task(get_openrouter_free_model())
+    asyncio.create_task(background_monitor())
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8002, log_level="info")

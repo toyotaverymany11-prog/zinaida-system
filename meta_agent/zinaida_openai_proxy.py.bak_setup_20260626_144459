@@ -1,0 +1,149 @@
+import sys, os, json, time, uuid, logging, asyncio, warnings, base64, copy
+from pathlib import Path
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+import uvicorn
+import httpx
+
+warnings.filterwarnings("ignore")
+sys.path.insert(0, str(Path(__file__).parent))
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [ROUTER] %(message)s")
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Zinaida Smart Router")
+
+ENV_PATH = Path("/opt/zinaida/.env")
+def load_env():
+    if ENV_PATH.exists():
+        with open(ENV_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
+load_env()
+
+PROVIDERS = {
+    "zhipu": {"url": "https://open.bigmodel.cn/api/paas/v4/chat/completions", "key": os.getenv("ZHIPU_API_KEY", ""), "model": "glm-4-flash"},
+    "github": {"url": "https://models.github.ai/inference/chat/completions", "key": os.getenv("GITHUB_TOKEN", ""), "model": "gpt-4.1-mini"},
+    "mistral": {"url": "https://api.mistral.ai/v1/chat/completions", "key": os.getenv("MISTRAL_API_KEY", ""), "model": "mistral-small-latest"},
+    "openrouter": {"url": "https://openrouter.ai/api/v1/chat/completions", "key": os.getenv("OPENROUTER_API_KEY_2", ""), "model": "meta-llama/llama-3.3-70b-instruct:free"},
+    "gigachat": {"url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions", "key": os.getenv("GIGACHAT_CLIENT_ID", ""), "model": "GigaChat"}
+}
+
+ORDER_CHAT = ["mistral", "github", "openrouter", "gigachat"]
+ORDER_CODE = ["mistral", "github", "openrouter"]
+ALLOWED_KEYS = {"model", "messages", "stream", "max_tokens", "temperature", "top_p", "frequency_penalty", "presence_penalty", "stop", "user"}
+
+def is_code_request(messages):
+    if not messages: return False
+    last_msg = messages[-1].get("content", "").lower()
+    keywords = ["код", "скрипт", "python", "html", "css", "javascript", "function", "def ", "class ", "напиши программу", "code", "script", "api", "json", "sql"]
+    return any(kw in last_msg for kw in keywords)
+
+def truncate_messages(messages, max_keep=8):
+    if len(messages) <= max_keep + 1: return messages
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    recent_msgs = messages[-(max_keep):]
+    return system_msgs + recent_msgs
+
+def sanitize_payload(payload):
+    return {k: v for k, v in payload.items() if k in ALLOWED_KEYS}
+
+async def get_gigachat_token():
+    try:
+        client_id = os.getenv("GIGACHAT_CLIENT_ID", "")
+        client_secret = os.getenv("GIGACHAT_CLIENT_SECRET", "")
+        if not client_id or not client_secret: return None
+        auth_str = f"{client_id}:{client_secret}"
+        b64_auth = base64.b64encode(auth_str.encode()).decode()
+        async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+            resp = await client.post(
+                "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+                headers={"Authorization": f"Basic {b64_auth}", "RqUID": str(uuid.uuid4()), "Content-Type": "application/x-www-form-urlencoded"},
+                data={"scope": "GIGACHAT_API_PERS"}
+            )
+            resp.raise_for_status()
+            return resp.json().get("access_token")
+    except Exception as e:
+        logger.warning(f"GigaChat token failed: {e}")
+        return None
+
+async def prepare_payload_and_headers(name: str, payload: dict):
+    p = PROVIDERS[name]
+    headers = {"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"}
+    work = sanitize_payload(copy.deepcopy(payload))
+    work["messages"] = truncate_messages(work.get("messages", []))
+    work["model"] = p["model"]
+    if name == "openrouter":
+        headers.update({"HTTP-Referer": "https://zinaida.local", "X-Title": "ZinaidaRouter"})
+    elif name == "gigachat":
+        token = await get_gigachat_token()
+        if not token: raise Exception("No GigaChat token")
+        headers["Authorization"] = f"Bearer {token}"
+    elif name == "github":
+        work["model"] = "gpt-4.1-mini"
+    elif name == "mistral":
+        filtered = []
+        for msg in work.get("messages", []):
+            if msg.get("role") == "system" and len(filtered) > 0: continue
+            filtered.append(msg)
+        work["messages"] = filtered
+    return headers, work
+
+async def call_provider_json(name: str, payload: dict, timeout: float = 30.0):
+    p = PROVIDERS[name]
+    headers, work = await prepare_payload_and_headers(name, payload)
+    async with httpx.AsyncClient(verify=False, timeout=httpx.Timeout(timeout, read=timeout, connect=30.0)) as client:
+        resp = await client.post(p["url"], headers=headers, json=work)
+        resp.raise_for_status()
+        return resp.json()
+
+@app.post("/v1/chat/completions")
+async def chat(request: Request):
+    try:
+        data = await request.json()
+        is_stream = data.get("stream", False)
+        timeout = float(data.get("timeout", 180.0))
+        order = ORDER_CODE if is_code_request(data.get("messages", [])) else ORDER_CHAT
+        for name in order:
+            if not PROVIDERS[name]["key"]: continue
+            try:
+                if is_stream:
+                    headers, work = await prepare_payload_and_headers(name, data)
+                    client = httpx.AsyncClient(verify=False, timeout=httpx.Timeout(timeout, read=timeout, connect=30.0))
+                    resp = await client.send(client.build_request("POST", PROVIDERS[name]["url"], headers=headers, json=work), stream=True)
+                    if resp.status_code >= 400:
+                        await resp.aclose()
+                        await client.aclose()
+                        raise httpx.HTTPStatusError(f"HTTP {resp.status_code}", request=resp.request, response=resp)
+                    async def stream_gen(r, c):
+                        try:
+                            async for chunk in r.aiter_lines():
+                                if chunk: yield f"{chunk}\n\n"
+                        finally:
+                            await r.aclose()
+                            await c.aclose()
+                    return StreamingResponse(stream_gen(resp, client), media_type="text/event-stream")
+                else:
+                    result = await call_provider_json(name, data, timeout)
+                    return JSONResponse(result)
+            except Exception as e:
+                logger.warning(f"Provider {name} failed: {e}")
+                continue
+        return JSONResponse({"error": "All providers failed"}, status_code=503)
+    except Exception as e:
+        logger.error(f"Router crash: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/v1/models")
+async def list_models():
+    return {"object": "list", "data": [{"id": "Zinaida-Router", "object": "model", "owned_by": "local"}]}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "port": 8002}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8002, log_level="info")

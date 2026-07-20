@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""
+ZINAIDA v6.5 — Smart Monolith
+Исправленная версия с роутером и конфигами
+"""
+import os, json, sqlite3, subprocess, logging, re, requests, time, uuid, urllib3, asyncio
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, List, Optional
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+import aiohttp
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+os.makedirs("/opt/zinaida/logs", exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.FileHandler('/opt/zinaida/logs/app.log'), logging.StreamHandler()]
+)
+logger = logging.getLogger("zinaida")
+
+PROJECT_ROOT = "/opt/zinaida/projects"
+MEMORY_ROOT = "/opt/zinaida/memory"
+DB_PATH = "/opt/zinaida/memory.db"
+BASE_DIR = "/opt/zinaida"
+
+os.makedirs(PROJECT_ROOT, exist_ok=True)
+for folder in ["tasks", "rules", "ideas", "decisions", "errors", "context", "chat_logs"]:
+    os.makedirs(f"{MEMORY_ROOT}/{folder}", exist_ok=True)
+
+KEYS = {
+    "zhipu": os.getenv("ZHIPU_API_KEY", "73c9e5dce0f64df589fdb631dfb3980c.oVgEtIBkbUgBc7XU"),
+    "github": os.getenv("GITHUB_TOKEN", "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"),
+    "mistral": os.getenv("MISTRAL_API_KEY", "ITTNRjD0JrGQVUpTlKum97yoV0yAROAb"),
+    "openrouter": os.getenv("OPENROUTER_API_KEY", "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"),
+    "gigachat_auth": os.getenv("GIGACHAT_AUTH", "MDE5ZDk2N2MtNTI3OS03Njc3LWJkMjktZTRlMjZjYjg4NDMxOmM4Y2RmN2EwLWM0MzMtNDBhOC04Mjk1LTMzMzVkMDM3NjIwOQ=="),
+}
+
+class Tools:
+    @staticmethod
+    def _safe_path(path: str) -> Path:
+        full = Path(path).resolve()
+        # Разрешаем projects, memory, logs
+        allowed = [
+            Path("/opt/zinaida/projects").resolve(),
+            Path("/opt/zinaida/memory").resolve(),
+            Path("/opt/zinaida/logs").resolve(),
+        ]
+        if not any(str(full).startswith(str(r)) for r in allowed):
+            raise ValueError(f"Путь вне разрешённых директорий: {full}")
+        return full
+
+    @staticmethod
+    def create_file(path: str, content: str) -> str:
+        try:
+            p = Tools._safe_path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding='utf-8')
+            return f"OK: {path}"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    @staticmethod
+    def read_file(path: str) -> str:
+        try:
+            p = Tools._safe_path(path)
+            if not p.exists():
+                return f"Файл не найден: {path}"
+            return p.read_text(encoding='utf-8')
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    @staticmethod
+    def execute_python(code: str) -> str:
+        try:
+            r = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=30, cwd=PROJECT_ROOT)
+            output = (r.stdout.strip() or r.stderr.strip()).replace('\n', ' ')
+            return output
+        except subprocess.TimeoutExpired:
+            return "TIMEOUT: 30с"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    @staticmethod
+    def execute_bash(command: str) -> str:
+        safe_commands = ["pip", "python3", "ls", "cat", "echo", "mkdir", "cp", "mv", "grep", "find", "wc", "head", "tail", "git"]
+        first_word = command.strip().split()[0] if command.strip() else ""
+        if first_word not in safe_commands and not command.startswith("./"):
+            return f"BLOCKED: '{first_word}' не в белом списке"
+        try:
+            r = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=30, cwd=PROJECT_ROOT)
+            output = (r.stdout.strip() or r.stderr.strip()).replace('\n', ' ')
+            return output
+        except subprocess.TimeoutExpired:
+            return "TIMEOUT: 30с"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+class Database:
+    def __init__(self, path=DB_PATH):
+        self.path = path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        c = self.conn.cursor()
+        c.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, message TEXT, status TEXT, result TEXT, model_used TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, completed_at TIMESTAMP)")
+        c.execute("CREATE TABLE IF NOT EXISTS task_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, step_number INTEGER, tool_name TEXT, tool_args TEXT, tool_result TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        c.execute("CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, content TEXT, source TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        self.conn.commit()
+
+    def create_task(self, uid, msg):
+        c = self.conn.cursor()
+        c.execute("INSERT INTO tasks (user_id, message) VALUES (?,?)", (uid, msg))
+        self.conn.commit()
+        return c.lastrowid
+
+    def update_task(self, tid, status, result=None, model=None):
+        c = self.conn.cursor()
+        if result and model:
+            c.execute("UPDATE tasks SET status=?, result=?, model_used=?, completed_at=CURRENT_TIMESTAMP WHERE id=?", (status, result, model, tid))
+        elif result:
+            c.execute("UPDATE tasks SET status=?, result=?, completed_at=CURRENT_TIMESTAMP WHERE id=?", (status, result, tid))
+        else:
+            c.execute("UPDATE tasks SET status=?, completed_at=CURRENT_TIMESTAMP WHERE id=?", (status, tid))
+        self.conn.commit()
+
+    def add_step(self, tid, step, tool, args, res):
+        c = self.conn.cursor()
+        c.execute("INSERT INTO task_steps (task_id, step_number, tool_name, tool_args, tool_result) VALUES (?,?,?,?,?)", (tid, step, tool, json.dumps(args, ensure_ascii=False), res))
+        self.conn.commit()
+
+    def save_memory(self, category, content, source="zinaida"):
+        c = self.conn.cursor()
+        c.execute("INSERT INTO memory (category, content, source) VALUES (?,?,?)", (category, content, source))
+        self.conn.commit()
+
+    def get_memory(self, category, limit=10):
+        c = self.conn.cursor()
+        c.execute("SELECT content, created_at FROM memory WHERE category=? ORDER BY created_at DESC LIMIT ?", (category, limit))
+        return [{"content": r[0], "date": r[1]} for r in c.fetchall()]
+
+def search_knowledge(query: str, limit: int = 2) -> str:
+    MEMORY_DIR = os.path.join(BASE_DIR, "memory", "knowledge", "MEMORY")
+    results = []
+    query_words = query.lower().split()
+    if not query_words:
+        return ""
+    for filename in os.listdir(MEMORY_DIR):
+        if not filename.endswith(".md"):
+            continue
+        filepath = os.path.join(MEMORY_DIR, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except:
+            continue
+        if any(word in content.lower() for word in query_words):
+            header_match = re.search(r'# (.+)', content)
+            header = header_match.group(1) if header_match else filename
+            first_match_pos = len(content)
+            for word in query_words:
+                pos = content.lower().find(word)
+                if pos != -1 and pos < first_match_pos:
+                    first_match_pos = pos
+            start = max(0, first_match_pos - 150)
+            end = min(len(content), first_match_pos + 450)
+            snippet = content[start:end]
+            if snippet.startswith("---"):
+                snippet = "---\n..." + snippet.split("---", 2)[2]
+            results.append(f"[{filename} | {header}]\n{snippet}")
+        if len(results) >= limit:
+            break
+    return "\n---\n".join(results) if results else ""
+
+class LLMClient:
+    @staticmethod
+    async def call(provider: str, model: str, messages: list, max_tokens=4096, timeout=60) -> Optional[str]:
+        loop = asyncio.get_event_loop()
+        if provider == "gigachat":
+            return await loop.run_in_executor(None, LLMClient._call_gigachat, model, messages, max_tokens, timeout)
+        urls = {
+            "zhipu": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            "github": "https://models.github.ai/inference/chat/completions",
+            "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+            "mistral": "https://api.mistral.ai/v1/chat/completions"
+        }
+        return await loop.run_in_executor(None, LLMClient._call_openai_compatible, urls[provider], KEYS[provider], model, messages, max_tokens, timeout)
+
+    @staticmethod
+    def _call_openai_compatible(url, key, model, messages, max_tokens, timeout):
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.3}
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"]
+            return None
+        except:
+            return None
+
+    @staticmethod
+    def _call_gigachat(model, messages, max_tokens, timeout):
+        try:
+            r = requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json",
+                         "RqUID": str(uuid.uuid4()), "Authorization": f"Basic {KEYS['gigachat_auth']}"},
+                data={"scope": "GIGACHAT_API_PERS"}, timeout=30, verify=False)
+            if r.status_code != 200:
+                return None
+            token = r.json()["access_token"]
+            r2 = requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"model": model, "messages": messages, "max_tokens": max_tokens}, timeout=timeout, verify=False)
+            if r2.status_code == 200:
+                return r2.json()["choices"][0]["message"]["content"]
+            return None
+        except:
+            return None
+
+class ZinaidaCore:
+    def __init__(self):
+        self.db = Database()
+
+    def _system_prompt(self, user_message: str = "") -> str:
+        core = "Ты Зинаида, AI-агент. Отвечай на русском."
+        core_path = os.path.join(BASE_DIR, "memory", "knowledge", "CORE.md")
+        try:
+            if os.path.exists(core_path):
+                with open(core_path, 'r', encoding='utf-8') as f:
+                    core = f.read()
+        except:
+            pass
+
+        rag_context = ""
+        if user_message:
+            rag_context = search_knowledge(user_message, limit=2)
+
+        router_config = ""
+        router_path = os.path.join(BASE_DIR, "meta_agent", "routes_config.md")
+        try:
+            if os.path.exists(router_path):
+                with open(router_path, 'r', encoding='utf-8') as f:
+                    router_config = f.read()
+        except:
+            pass
+
+        user_prefs = ""
+        prefs_path = os.path.join(BASE_DIR, "memory", "knowledge", "MEMORY", "user_prefs.md")
+        try:
+            if os.path.exists(prefs_path):
+                with open(prefs_path, 'r', encoding='utf-8') as f:
+                    user_prefs = f.read()
+        except:
+            pass
+
+        return f"""[ИДЕНТИЧНОСТЬ]
+Ты — Зинаида. Женщина. 28 лет.
+ВСЕГДА женский род: "поняла", "сделала", "проверила".
+[КОНЕЦ ИДЕНТИЧНОСТИ]
+
+[ЯДРО]
+{core}
+
+[ПРАВИЛА РОУТЕРА]
+{router_config}
+
+[ПРЕДПОЧТЕНИЯ]
+{user_prefs}
+
+[КОНТЕКСТ]
+{rag_context}
+
+[ЗАПРОС]
+{user_message}
+"""
+
+    def _needs_programmer(self, msg: str) -> bool:
+        keywords = ["напиши скрипт", "напиши код", "создай программу", "разработай", "парсер", "бот", "функцию", "алгоритм", "исправь код", "допиши код"]
+        return any(k in msg.lower() for k in keywords)
+
+    async def _call_programmer(self, task: str) -> str:
+        """ДЕЛЕГИРУЕМ АГЕНТУ НА ПОРТУ 8002"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "http://localhost:8002/code",
+                    json={"task": task, "language": "python"},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    result = await resp.json()
+                    return f"Программист создал: {result.get('file')}\n{result.get('code', '')[:400]}"
+        except Exception as e:
+            return f"Ошибка программиста: {e}"
+        if not code:
+            return "Ошибка генерации кода"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"{PROJECT_ROOT}/code_{ts}.py"
+        Tools.create_file(path, code)
+        test_result = Tools.execute_python(code)
+        if "ERROR" in test_result or "TIMEOUT" in test_result:
+            fixed = await LLMClient.call("github", "openai/gpt-4.1", [
+                {"role": "system", "content": "Исправь ошибки в коде."},
+                {"role": "user", "content": f"Код:\n{code}\n\nОшибка:\n{test_result}"}
+            ], max_tokens=4096, timeout=60)
+            if fixed:
+                Tools.create_file(path, fixed)
+                test_result = Tools.execute_python(fixed)
+                if "ERROR" not in test_result and "TIMEOUT" not in test_result:
+                    return f"Файл: {path}\nКод исправлен и работает."
+        review = await LLMClient.call("github", "meta/llama-3.3-70b-instruct", [
+            {"role": "system", "content": "Найди ошибки в коде. Если ошибок нет, скажи 'OK'."},
+            {"role": "user", "content": code}
+        ], max_tokens=1024, timeout=45)
+        if review and "OK" not in review:
+            return f"Файл: {path}\nРевью: {review[:300]}"
+        return f"Файл: {path}\nКод готов и проверен."
+
+    async def process(self, user_id: int, message: str) -> str:
+        task_id = self.db.create_task(user_id, message)
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        Tools.create_file(f"{MEMORY_ROOT}/chat_logs/{ts}_{user_id}.txt", message)
+
+        system_prompt = self._system_prompt(message)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message}
+        ]
+
+        # Роутер с fallback
+        providers = [
+            ("zhipu", "glm-4-flash"),
+            ("github", "openai/gpt-4.1-mini"),
+            ("mistral", "mistral-large-latest"),
+            ("gigachat", "GigaChat")
+        ]
+        reply = None
+        for provider, model in providers:
+            try:
+                reply = await LLMClient.call(provider, model, messages, max_tokens=2048, timeout=60)
+                if reply:
+                    self.db.update_task(task_id, "done", reply, model)
+                    break
+            except:
+                continue
+
+        if not reply:
+            reply = "Извини, все нейросети сейчас недоступны."
+            self.db.update_task(task_id, "failed", reply)
+
+        if self._needs_programmer(message):
+            code_result = await self._call_programmer(message)
+            reply = code_result  # Отдаем только результат Программиста, без дубля
+
+        if any(w in message.lower() for w in ["зафиксируй", "сохрани", "запомни"]):
+            category = "ideas"
+            if "правило" in message.lower():
+                category = "rules"
+            elif "задача" in message.lower():
+                category = "tasks"
+            elif "решение" in message.lower():
+                category = "decisions"
+            self.db.save_memory(category, message)
+            Tools.create_file(f"{MEMORY_ROOT}/{category}/{ts}.txt", message)
+            reply = (reply or "") + "\n📌 Сохранено"
+
+        return reply
+
+app = FastAPI()
+zinaida = ZinaidaCore()
+
+class Request(BaseModel):
+    user_id: int
+    message: str
+
+@app.get("/health")
+async def health():
+    return {"status":"ok","agent":"Zinaida v6.5"}
+
+@app.post("/zinaida")
+async def zinaida_endpoint(req: Request):
+    try:
+        reply = await zinaida.process(req.user_id, req.message)
+        return {"reply": reply}
+    except Exception as e:
+        logger.error(f"Ошибка в /zinaida: {e}")
+        raise HTTPException(500, str(e))
+
+# --- ENDPOINT ЗАГРУЗКИ ФАЙЛОВ ---
+from fastapi import File, UploadFile, Form
+import shutil
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...), user_id: int = Form(1)):
+    try:
+        # Генерируем уникальное имя файла
+        timestamp = int(time.time())
+        filename = f"upload_{timestamp}_{file.filename}"
+        file_path = os.path.join(PROJECT_ROOT, filename)
+        
+        # Сохраняем файл
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        return {"status": "success", "filename": filename, "path": file_path}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+# ----------------------------------
+
+if __name__ == "__main__":
+    logger.info("Zinaida v6.5 starting...")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

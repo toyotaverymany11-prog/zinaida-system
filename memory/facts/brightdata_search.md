@@ -1,0 +1,1 @@
+🔴 ЖЕЛЕЗНЫЙ ФАКТ: BrightData жив. Ключ 929dbdc5-0160-4acd-9fe3-ca85d604a3fe в /opt/zinaida/.env и /root/.hermes/.env. Bearer auth. Вызов: python3 /opt/zinaida/scripts/web_search_brightdata.py "запрос" --limit N. DuckDuckGo — built-in fallback. При любом "найди/поищи" — BrightData первым.
