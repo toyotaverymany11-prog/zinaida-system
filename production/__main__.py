@@ -29,6 +29,8 @@ def main(argv=None):
     s.add_argument("--max-samples", type=int, default=24)
     s = sub.add_parser("costs")
     s.add_argument("ledger", type=Path)
+    s = sub.add_parser("prepare-speech")
+    s.add_argument("specification", type=Path)
     s = sub.add_parser("prepare-gpu")
     s.add_argument("workflow", type=Path)
     s.add_argument("--job-id", required=True)
@@ -58,6 +60,9 @@ def main(argv=None):
                 result = render(manifest, args.root, args.output, Runtime(args.timeout, args.cancel_file))
             else:
                 result = release_check(manifest, args.root, args.output, read_json(args.decisions))
+        elif args.command == "prepare-speech":
+            from .speech import prepare_batch
+            result = prepare_batch(read_json(args.specification))
         elif args.command == "costs":
             from .costs import summarize
             ledger = read_json(args.ledger)

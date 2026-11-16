@@ -19,10 +19,10 @@
 
 ## Установка и техническая проба
 
-Проверено с Python 3.12 и установленным FFmpeg/ffprobe. Команды выполняются из корня репозитория. Создавать новые исходники поверх существующего каталога пакет откажется.
+Нужен Python 3.11 или новее: закреплённый Pillow 13 не поддерживает Python 3.10. Проверено с Python 3.12, включая отдельный Linux-исполнитель с FFmpeg/ffprobe 4.4.2. Команды выполняются из корня репозитория. Создавать новые исходники поверх существующего каталога пакет откажется. На машине со старым Python используйте отдельный интерпретатор и виртуальное окружение; системный Python менять не требуется.
 
 ```bash
-python3 -m venv production/.venv
+python3.12 -m venv production/.venv
 production/.venv/bin/pip install -r production/requirements.txt
 production/.venv/bin/python -m unittest discover -s production/tests -v
 production/.venv/bin/python -m production.demo /tmp/production-fixture
@@ -80,6 +80,16 @@ production/.venv/bin/python -m production download-gpu plan.json --receipts /pat
 
 ## Подключение к существующей системе
 
+### Подготовка актёрских реплик
+
+`python -m production prepare-speech speech-spec.json` готовит отдельные запросы Fish Audio, считает именно UTF-8 байты вместе с указаниями подачи и не отправляет их. Модель и голос обязательны: ошибка в имени модели у поставщика может включить платную модель по умолчанию. Пакет отвергает неизвестные модели и просроченную проверку цены. Бесплатная акция ограничена подтверждённым сроком; её продление требует новой проверки и изменения кода.
+
+В спецификации нужны `schema_version: 1`, `model`, `quote` (model, unit=million_utf8_bytes, usd_per_unit, checked_at, valid_until, source), `voices` (provider_voice_id, version, sample_sha256) и `lines` (id, voice, spoken_text, directed_text; при необходимости temperature и speed). Квадратные скобки в directed_text задают актёрскую подачу, но произносимые слова должны совпадать с spoken_text. Пример структуры есть в `production/tests/test_speech.py`; идентификаторы там синтетические.
+
+Изменение подачи одной реплики меняет только её ключ повторного использования. Смена модели, голоса или версии образца также меняет ключ. Принятые дорожки сохраняются отдельно; новый дубль не заменяет их автоматически. Перед приёмкой проверяются тембр, слова, ударения и игра. Расчёт цены не подтверждает наличие денег на счёте и не разрешает оплату. Исполнитель сетевых запросов и связь с существующей очередью подключаются отдельно; платного переключения здесь нет.
+
+### Передача задания
+
 1. Найти действующий модуль карточек/очереди и его служебную учётную запись.
 2. Передавать из него неизменяемое задание, ID, ревизию, пути и пределы работы этому пакету.
 3. Читать структурированный JSON-результат и сохранять ссылки в существующую карточку.
@@ -94,5 +104,7 @@ production/.venv/bin/python -m production download-gpu plan.json --receipts /pat
 - [ComfyUI server routes](https://docs.comfy.org/development/comfyui-server/comms_routes)
 - [FFmpeg filters](https://ffmpeg.org/ffmpeg-filters.html)
 - [OpenTimelineIO](https://github.com/AcademySoftwareFoundation/OpenTimelineIO)
+- [Fish Audio: цены и единицы тарификации](https://docs.fish.audio/developer-guide/models-pricing/pricing-and-rate-limits.md)
+- [Fish Audio: управление подачей Drama 3](https://docs.fish.audio/features/text-to-speech/drama-3.md)
 
 Контрольные материалы и персонажи пользователя хранятся вне публичного репозитория.
