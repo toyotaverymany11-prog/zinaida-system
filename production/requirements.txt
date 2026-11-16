@@ -1,0 +1,4 @@
+Pillow==13.0.0
+opentimelineio==0.18.1
+qrcode==8.2
+zxing-cpp==2.3.0
