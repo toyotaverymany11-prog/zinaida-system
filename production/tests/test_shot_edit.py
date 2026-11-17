@@ -52,3 +52,15 @@ class ShotEdit(unittest.TestCase):
     def test_changed_render_cannot_be_packaged(self):
         self.build();(self.output/'render/master.mp4').write_bytes(b'bad')
         with self.assertRaisesRegex(ProductionError,'changed before packaging'):package_preview(self.output)
+
+    def test_delivery_rejects_modified_archive(self):
+        from production.shots import folder,shot_state
+        from production.shot_edit import project_file
+        self.output=folder(self.case.root,self.case.ident,self.case.request['request_id'])/'edit'
+        self.build();p=package_preview(self.output)
+        self.assertEqual(project_file(self.case.root,self.case.ident,self.case.request['request_id']),p)
+        self.assertTrue(shot_state(self.case.root,self.case.ident)['project_available'])
+        p.write_bytes(b'changed')
+        with self.assertRaisesRegex(ProductionError,'package changed'):
+            project_file(self.case.root,self.case.ident,self.case.request['request_id'])
+        self.assertFalse(shot_state(self.case.root,self.case.ident)['project_available'])

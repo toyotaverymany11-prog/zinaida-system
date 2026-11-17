@@ -124,6 +124,14 @@ def shot_state(root, ident, request_id=None):
                             (request_id,)).fetchone()
     if review:
         result['quality_review'] = json.loads(review[0])
+    result['project_available'] = False
+    if (folder(root,ident,request_id)/'edit/project-package.json').exists():
+        from .shot_edit import project_file
+        try:
+            project_file(root,ident,request_id)
+            result['project_available'] = True
+        except (ProductionError, OSError, KeyError, ValueError):
+            pass
     try:
         check_current(root, ident, request, Runtime(30))
     except ProductionError:

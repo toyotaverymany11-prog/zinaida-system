@@ -361,6 +361,9 @@ def server(root, port, **preparation_options):
                     if len(parts) == 5 and parts[4] == 'shots':
                         from .shots import shot_state
                         return self.response(200,shot_state(root,ident))
+                    if len(parts) == 7 and parts[4] == 'shots' and parts[6] == 'project':
+                        from .shot_edit import project_file
+                        return self.file_response(project_file(root,ident,parts[5]),'application/zip')
                     if len(parts) == 7 and parts[4] == 'shots' and parts[6] == 'video':
                         from .shots import shot_file
                         return self.file_response(shot_file(root,ident,parts[5]),'video/mp4')

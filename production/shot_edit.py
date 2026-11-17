@@ -9,6 +9,19 @@ from .media import render
 from .shots import folder, load_request, shot_file
 
 
+def project_file(root, ident, request_id):
+    """Read-only delivery of a current, previously built and verified package."""
+    shot_file(root,ident,request_id)
+    output=folder(root,ident,request_id)/'edit'
+    if not output.is_dir():raise ProductionError('Project package has not been built')
+    build(root,ident,request_id,output)  # Existing-output branch only; no rendering.
+    receipt=read_json(output/'project-package.json')
+    path=output/'preview-project.zip'
+    if receipt['manifest_sha256']!=object_digest(read_json(output/'manifest.json')) or digest(path)!=receipt['sha256']:
+        raise ProductionError('Project package changed')
+    return path
+
+
 def package_preview(output):
     """A portable review bundle, preserving the original and relative OTIO links."""
     import zipfile
