@@ -25,12 +25,12 @@ def verified(root, item):
 
 
 def prepare_order(root, order_id, *, python=None, model_path=None, model='small',
-                  timeout=300, cancel_file=None, max_samples=12):
+                  timeout=300, cancel_file=None, max_samples=12, should_cancel=None):
     ident=str(UUID(order_id))
     if type(max_samples) is not int or not 2<=max_samples<=80:
         raise ProductionError('max_samples must be 2..80')
     intake=Intake(root)
-    runtime=Runtime(timeout,cancel_file)
+    runtime=Runtime(timeout,cancel_file,should_cancel)
     with intake.connect() as db:
         row=db.execute('SELECT data FROM orders WHERE id=?',(ident,)).fetchone()
     if not row:

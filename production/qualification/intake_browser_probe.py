@@ -59,6 +59,14 @@ def main():
             assert page.locator('.receipt').count()==1
             page.reload()
             page.wait_for_selector('.receipt')
+            expect(page.locator('.receipt')).to_contain_text(
+                'Ожидается смысловая и художественная проверка.')
+            prepared = json.load(opener.open(url+'/api/orders', timeout=5))[0]
+            assert prepared['preparation']['status'] == 'awaiting_review'
+            assert prepared['preparation']['reference_count'] == 1
+            assert prepared['budget_usd'] == 0 and not prepared['generation_authorized']
+            receipt = json.loads((a.output/'data'/'preparations'/prepared['id']/'receipt.json').read_text())
+            assert receipt['provider_calls'] == 0 and receipt['semantic_review'] == 'not_performed'
             page.screenshot(path=str(a.output/'desktop.png'),full_page=True)
             page.set_viewport_size({'width':390,'height':844})
             assert page.evaluate('() => document.documentElement.scrollWidth <= innerWidth')
@@ -75,7 +83,7 @@ def main():
             data=json.load(opener.open(url+'/api/orders'))
             assert data[0]['status']=='needs_transcription' and data[0]['voice']['kind']=='audio'
             report={'browser_flow':True,'duplicate_prevented':True,'reload_persists':True,
-                'mobile_overflow':False,'voice_recorded_and_saved':True,'page_errors':errors,
+                'controller_status':prepared['preparation']['status'], 'mobile_overflow':False,'voice_recorded_and_saved':True,'page_errors':errors,
                 'provider_calls':0,'production_started':False,'synthetic_media':True}
             (a.output/'report.json').write_text(json.dumps(report,indent=2))
             print(json.dumps(report))

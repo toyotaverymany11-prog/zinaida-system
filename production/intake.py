@@ -1,6 +1,6 @@
 """Owner-local order intake. Stores briefs and media; never starts generation.
 
-This is the intake boundary of the future controller, not a competing job queue.
+The controller consumes preparation jobs committed alongside orders.
 Bind only to loopback until a separately verified identity gateway is available.
 """
 from __future__ import annotations
@@ -25,12 +25,29 @@ MODES = {'reference', 'face_replace', 'body_replace', 'new_video'}
 
 
 class Intake:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, enqueue=False):
+        self.enqueue = enqueue
         self.root = root.resolve()
         (self.root / 'assets').mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, data TEXT NOT NULL)')
+
+            db.execute("""CREATE TABLE IF NOT EXISTS preparation_jobs (
+                order_id TEXT PRIMARY KEY REFERENCES orders(id),
+                status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)""")
+
+    def cancel_preparation(self, ident):
+        ident = str(UUID(ident))
+        with self.connect() as db:
+            db.execute("""UPDATE preparation_jobs SET status=CASE status
+                WHEN 'queued' THEN 'cancelled' WHEN 'running' THEN 'cancelling'
+                ELSE status END WHERE order_id=?""", (ident,))
+            row = db.execute('SELECT status FROM preparation_jobs WHERE order_id=?',
+                             (ident,)).fetchone()
+        if not row:
+            raise ProductionError('Unknown preparation job')
+        return {'status': row[0]}
 
     @contextmanager
     def connect(self):
@@ -149,14 +166,21 @@ class Intake:
             if row:
                 if row[0]!=fingerprint:
                     raise ProductionError('Request ID already belongs to a different order')
-                return json.loads(row[1])
-            db.execute('INSERT INTO orders VALUES (?,?,?)',(ident,fingerprint,json.dumps(order,ensure_ascii=False)))
+                order = json.loads(row[1])
+            else:
+                db.execute('INSERT INTO orders VALUES (?,?,?)',
+                           (ident,fingerprint,json.dumps(order,ensure_ascii=False)))
+            if self.enqueue:
+                db.execute("INSERT OR IGNORE INTO preparation_jobs (order_id,status) VALUES (?,'queued')",
+                           (ident,))
         return order
 
     def orders(self):
         with self.connect() as db:
-            orders=[json.loads(r[0]) for r in db.execute('SELECT data FROM orders ORDER BY rowid DESC LIMIT 50')]
-        for order in orders:
+            orders = [(json.loads(data), status) for data, status in db.execute(
+                'SELECT orders.data, preparation_jobs.status FROM orders LEFT JOIN preparation_jobs '
+                'ON orders.id=preparation_jobs.order_id ORDER BY orders.rowid DESC LIMIT 50')]
+        for order, job_status in orders:
             fingerprint=object_digest(order)
             receipt=self.root/'preparations'/order['id']/'receipt.json'
             if receipt.is_file():
@@ -165,17 +189,34 @@ class Intake:
                     order['preparation']={'status':data['status'],
                         'reference_count':len(data.get('reference_evidence',[])),
                         'blocker':data.get('blocker')}
+            if job_status:
+                order.setdefault('preparation', {})['status'] = job_status
             transcript=self.root/'transcripts'/f"{order['id']}.json"
             if order.get('voice') and transcript.is_file():
                 data=json.loads(transcript.read_text())
                 if data.get('source_sha256')==order['voice']['id']:
                     order['transcript']=data
                     order['status']='needs_transcript_review'
-        return orders
+        return [order for order, _ in orders]
 
 
-def server(root, port):
-    intake=Intake(root)
+def server(root, port, **preparation_options):
+    from .controller import PreparationController
+
+    intake = Intake(root, enqueue=True)
+    class IntakeServer(HTTPServer):
+        def serve_forever(self, poll_interval=0.5):
+            try:
+                self.controller.thread.start()
+                super().serve_forever(poll_interval)
+            finally:
+                self.controller.close()
+
+        def server_close(self):
+            if hasattr(self, 'controller'):
+                self.controller.close()
+            super().server_close()
+
     token=secrets.token_urlsafe(32)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -219,16 +260,42 @@ def server(root, port):
                     name=parse_qs(url.query).get('name',[''])[0]
                     return self.response(201,intake.upload(name,self.rfile,size))
                 if url.path=='/api/orders' and 0<size<=65536:
-                    return self.response(201,intake.create(json.loads(self.rfile.read(size))))
+                    order = intake.create(json.loads(self.rfile.read(size)))
+                    self.server.controller.ready.set()
+                    return self.response(201, order)
+                parts = url.path.split('/')
+                if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'cancel' and size == 0:
+                    return self.response(200, intake.cancel_preparation(parts[3]))
                 raise ProductionError('Invalid request size or path')
             except (ProductionError,ValueError,OSError,KeyError,TypeError) as exc:
                 self.response(400,{'error':str(exc)})
-    return HTTPServer(('127.0.0.1',port),Handler)
+    http = IntakeServer(('127.0.0.1', port), Handler)
+    try:
+        http.controller = PreparationController(intake, **preparation_options)
+    except BaseException:
+        HTTPServer.server_close(http)
+        raise
+    return http
 
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description='Local owner intake; no generation or public access')
     p.add_argument('--root',type=Path,required=True)
     p.add_argument('--port',type=int,default=18117)
+    p.add_argument('--preparation-timeout', type=float, default=300)
+    p.add_argument('--speech-python', type=Path)
+    p.add_argument('--speech-model-path', type=Path)
+    p.add_argument('--speech-model', choices=['tiny', 'small'], default='small')
     a=p.parse_args()
-    server(a.root,a.port).serve_forever()
+    import signal
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
+    with server(a.root, a.port, timeout=a.preparation_timeout, python=a.speech_python,
+                model_path=a.speech_model_path, model=a.speech_model) as http:
+        try:
+            http.serve_forever()
+        except KeyboardInterrupt:
+            pass

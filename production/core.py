@@ -75,12 +75,14 @@ def number(value, name: str, minimum=0, maximum=None):
 class Runtime:
     """One deadline across all subprocesses. Cancellation kills our process group only."""
 
-    def __init__(self, seconds=900, cancel_file: Path | None = None):
+    def __init__(self, seconds=900, cancel_file: Path | None = None, should_cancel=None):
         self.deadline = time.monotonic() + number(seconds, "timeout", 0.1, 86400)
         self.cancel_file = cancel_file
+        self.should_cancel = should_cancel
 
     def check(self):
-        if self.cancel_file and self.cancel_file.exists():
+        if ((self.should_cancel and self.should_cancel()) or
+                (self.cancel_file and self.cancel_file.exists())):
             raise Cancelled("Cancellation requested")
         if time.monotonic() >= self.deadline:
             raise Cancelled("Worker deadline exceeded")
