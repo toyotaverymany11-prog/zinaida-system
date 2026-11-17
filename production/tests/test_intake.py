@@ -12,6 +12,7 @@ from uuid import uuid4
 from production.core import ProductionError
 from production.demo import make_fixture
 from production.intake import Intake, server
+from production.local_transcription import transcribe
 
 
 class IntakeIntegration(unittest.TestCase):
@@ -60,6 +61,21 @@ class IntakeIntegration(unittest.TestCase):
         result=self.intake.create({'request_id':str(uuid4()),'mode':'new_video','voice':self.upload('tone.wav')})
         self.assertEqual(result['status'],'needs_transcription')
         self.assertEqual(result['brief'],'')
+
+    def test_transcription_requires_cached_weights_and_keeps_original_order(self):
+        result=self.intake.create({'request_id':str(uuid4()),'mode':'new_video','voice':self.upload('tone.wav')})
+        with self.assertRaisesRegex(ProductionError,'automatic download is disabled'):
+            transcribe(self.root,result['id'],Path('/unused/python'),self.root/'absent-model.pt')
+        self.assertEqual(self.intake.orders()[0],result)
+        transcripts=self.root/'transcripts'
+        transcripts.mkdir()
+        draft={'source_sha256':result['voice']['id'],'model':'small',
+               'status':'draft_needs_review','text':'Синтетическая проверка чтения записи'}
+        (transcripts/f"{result['id']}.json").write_text(json.dumps(draft))
+        viewed=self.intake.orders()[0]
+        self.assertEqual(viewed['status'],'needs_transcript_review')
+        self.assertFalse(viewed['generation_authorized'])
+        self.assertEqual(viewed['brief'],'')
 
     def test_changed_media_and_incomplete_upload_fail(self):
         ident=self.upload('red.mp4')

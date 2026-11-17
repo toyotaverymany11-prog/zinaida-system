@@ -155,7 +155,15 @@ class Intake:
 
     def orders(self):
         with self.connect() as db:
-            return [json.loads(r[0]) for r in db.execute('SELECT data FROM orders ORDER BY rowid DESC LIMIT 50')]
+            orders=[json.loads(r[0]) for r in db.execute('SELECT data FROM orders ORDER BY rowid DESC LIMIT 50')]
+        for order in orders:
+            transcript=self.root/'transcripts'/f"{order['id']}.json"
+            if order.get('voice') and transcript.is_file():
+                data=json.loads(transcript.read_text())
+                if data.get('source_sha256')==order['voice']['id']:
+                    order['transcript']=data
+                    order['status']='needs_transcript_review'
+        return orders
 
 
 def server(root, port):
