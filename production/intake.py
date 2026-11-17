@@ -358,6 +358,12 @@ def server(root, port, **preparation_options):
                     return self.response(200, review_page(root, parts[2], token), True)
                 if len(parts) >= 5 and parts[:3] == ['', 'api', 'orders']:
                     ident = str(UUID(parts[3]))
+                    if len(parts) == 5 and parts[4] == 'shots':
+                        from .shots import shot_state
+                        return self.response(200,shot_state(root,ident))
+                    if len(parts) == 7 and parts[4] == 'shots' and parts[6] == 'video':
+                        from .shots import shot_file
+                        return self.file_response(shot_file(root,ident,parts[5]),'video/mp4')
                     if len(parts) == 5 and parts[4] == 'preview':
                         from .preview import preview_state
                         return self.response(200,preview_state(root,ident))
@@ -396,6 +402,12 @@ def server(root, port, **preparation_options):
                     self.server.controller.ready.set()
                     return self.response(201, order)
                 parts = url.path.split('/')
+                if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'shots' and 0 < size <= 2048:
+                    from .shots import prepare_shot
+                    return self.response(200,prepare_shot(root,parts[3],json.loads(self.rfile.read(size))))
+                if len(parts) == 7 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'shots' and parts[6] == 'review' and 0 < size <= 16384:
+                    from .shots import review_shot
+                    return self.response(200,review_shot(root,parts[3],parts[5],json.loads(self.rfile.read(size))))
                 if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'preview' and 0 < size <= 1024:
                     if not self.server.controller.thread.is_alive():
                         raise ProductionError('Controller is unavailable')

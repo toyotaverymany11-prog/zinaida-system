@@ -226,6 +226,9 @@ def review_page(root, order_id, token=None):
     if proposal and token and proposal['status'] != 'stale_evidence':
         from .preview import preview_controls
         parts.append(preview_controls(order['id'],proposal,token))
+        if order['mode'] == 'new_video' and not order['references'] and not order['characters']:
+            from .shots import shot_controls
+            parts.append(shot_controls(order['id'],proposal,token))
     parts.append('</html>')
     return ''.join(parts)
 

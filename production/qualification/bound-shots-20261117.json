@@ -1,0 +1,23 @@
+{
+  "scope": "order-to-shot binding and local quality review",
+  "tests": {"suite": "production/tests", "passed": 123, "seconds": 96.495},
+  "browser": {
+    "host": "control server, isolated staging",
+    "viewport": [390, 844],
+    "fixture": "synthetic red clip, not GPU generation",
+    "playback_ended": true,
+    "playback_error": null,
+    "page_errors": [],
+    "failed_quality_check_blocks_acceptance": true,
+    "revoked_plan_media_http_status": 409,
+    "horizontal_overflow": false
+  },
+  "provider_calls_in_this_qualification": 0,
+  "finished_video_accepted": false,
+  "limitations": [
+    "This tests the new binding with a mock GPU adapter and real media playback.",
+    "The separate H100 pilot is not retroactively attached to this synthetic order.",
+    "Execution is a trusted owner CLI on an existing guarded exclusive rental, not an automatic HTTP spending queue.",
+    "Reference editing, character identity and final-film artistic acceptance remain unqualified."
+  ]
+}

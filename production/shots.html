@@ -1,0 +1,35 @@
+<section><h2>Проба сцены на GPU</h2>
+<p>Пять секунд новой сцены по согласованному плану. Подготовка заявки бесплатна. Запуск выполняет оператор с отдельным пределом расходов и автоматическим удалением арендованного сервера.</p>
+<label>Сцена <select id="shot-scene"></select></label>
+<button id="shot-prepare">Подготовить заявку</button>
+<button id="shot-refresh">Обновить результат</button>
+<p id="shot-status" role="status"></p>
+<video id="shot-video" controls playsinline hidden style="max-width:100%"></video>
+<div id="shot-quality" hidden><p>Отметь только проверенные критерии. Это решение по отдельной сцене, не приёмка всего фильма.</p>
+<label><input type="checkbox" data-shot-check="prompt_match">Соответствие заданию</label><br>
+<label><input type="checkbox" data-shot-check="geometry">Форма объектов без искажений</label><br>
+<label><input type="checkbox" data-shot-check="temporal">Стабильность между кадрами</label><br>
+<label><input type="checkbox" data-shot-check="cinematography">Свет, композиция и движение камеры</label><br>
+<label><input type="checkbox" data-shot-check="audio">Звук соответствует сцене</label><br>
+<label>Основания решения<textarea id="shot-notes" rows="3"></textarea></label><br>
+<button id="shot-accept">Принять сцену</button><button id="shot-reject">Отправить на доработку</button>
+</div></section>
+<script nonce="__SHOT_NONCE__">
+const shotConfig=__SHOT_CONFIG__;
+let currentShot, preparedShotPayload, qualityPayload;
+const shotStatus=document.getElementById('shot-status'), shotVideo=document.getElementById('shot-video');
+const shotBase='/api/orders/'+shotConfig.order+'/shots';
+for(let i=0;i<shotConfig.scenes;i++){const o=document.createElement('option');o.value=i;o.textContent=i+1;document.getElementById('shot-scene').append(o)}
+async function shotApi(path,payload){const r=await fetch(path,payload?{method:'POST',headers:{'X-Intake-Token':shotConfig.token},body:JSON.stringify(payload)}:{});const d=await r.json();if(!r.ok)throw Error(d.error);return d}
+async function refreshShot(){try{currentShot=await shotApi(shotBase);const labels={not_requested:'Заявка ещё не подготовлена',prepared:'Заявка подготовлена. Ожидает ограниченного запуска оператором.',running:'Генерация выполняется',needs_quality_review:'Видео получено. Нужна проверка качества.',stale_plan:'План изменился. Нужна новая заявка.',interrupted_or_failed:'Попытка остановлена. Нужна проверка причины.'};shotStatus.textContent=labels[currentShot.status]||currentShot.status;
+const ready=currentShot.status==='needs_quality_review';shotVideo.hidden=!ready;document.getElementById('shot-quality').hidden=!ready;
+if(ready){const src=shotBase+'/'+currentShot.request_id+'/video';if(shotVideo.getAttribute('src')!==src)shotVideo.src=src;
+if(currentShot.quality_review)shotStatus.textContent+=' '+(currentShot.quality_review.decision==='accept_shot'?'Сцена принята отдельно.':'Нужна доработка сцены.');}
+}catch(e){shotStatus.textContent=e.message}}
+document.getElementById('shot-prepare').onclick=async()=>{try{const scene=Number(document.getElementById('shot-scene').value);if(!preparedShotPayload||preparedShotPayload.scene_index!==scene)preparedShotPayload={request_id:crypto.randomUUID(),expected_revision:shotConfig.revision,packet_sha256:shotConfig.packet,scene_index:scene,seed:137};await shotApi(shotBase,preparedShotPayload);await refreshShot()}catch(e){shotStatus.textContent=e.message}};
+document.getElementById('shot-refresh').onclick=refreshShot;
+async function decideShot(decision){try{const checks={};document.querySelectorAll('[data-shot-check]').forEach(e=>checks[e.dataset.shotCheck]=e.checked);const notes=document.getElementById('shot-notes').value;const body={output_sha256:currentShot.output_sha256,decision,checks,notes};const fingerprint=JSON.stringify(body);if(!qualityPayload||qualityPayload.fingerprint!==fingerprint)qualityPayload={fingerprint,body:{...body,request_id:crypto.randomUUID()}};await shotApi(shotBase+'/'+currentShot.request_id+'/review',qualityPayload.body);await refreshShot()}catch(e){shotStatus.textContent=e.message}}
+document.getElementById('shot-accept').onclick=()=>decideShot('accept_shot');
+document.getElementById('shot-reject').onclick=()=>decideShot('reject_shot');
+refreshShot();
+</script>
