@@ -74,3 +74,20 @@ class RecipeContracts(unittest.TestCase):
             with patch('production.recipes.WORKFLOWS',root):
                 with self.assertRaises(ProductionError):
                     ltx25_plan('A cube.',42,'ltx-test','http://127.0.0.1:8188')
+
+    def test_image_recipe_binds_image_prompt_and_both_seeds_without_paid_nodes(self):
+        from production.recipes import ltx25_image_plan
+        sha='a'*64
+        p=ltx25_image_plan('The cube stays rigid.',138,'image-probe','http://127.0.0.1:8188',sha+'.png',sha)
+        self.assertEqual(p['workflow']['395']['inputs']['image'],sha+'.png')
+        self.assertEqual(p['workflow']['398:338']['inputs']['noise_seed'],138)
+        self.assertEqual(p['workflow']['398:339']['inputs']['noise_seed'],138)
+        self.assertIn('LTXVImgToVideoInplace',p['node_classes'])
+        self.assertNotIn('TextGenerateLTX2Prompt',p['node_classes'])
+        self.assertNotIn('ComfySwitchNode',p['node_classes'])
+        self.assertFalse(p['gpu_qualified'])
+        q=ltx25_image_plan('The cube stays rigid.',138,'image-probe','http://127.0.0.1:8188','b'*64+'.png','b'*64)
+        self.assertNotEqual(p['workflow_sha256'],q['workflow_sha256'])
+        for name in ('../image.png','https://example.com/image.png',sha+'.jpg'):
+            with self.assertRaises(ProductionError):
+                ltx25_image_plan('A cube',138,'x','http://127.0.0.1:8188',name,sha)

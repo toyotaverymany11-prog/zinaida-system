@@ -5,12 +5,15 @@
 <button id="shot-refresh">Обновить результат</button>
 <p id="shot-status" role="status"></p>
 <video id="shot-video" controls playsinline hidden style="max-width:100%"></video>
+<p><a id="shot-project" hidden download="preview-project.zip">Скачать монтажный комплект</a></p>
+<div id="shot-revisions" hidden><h3>Исправленные версии</h3><p>Каждая версия требует отдельной проверки. Исходная сцена сохранена.</p><div id="shot-revision-list"></div></div>
 <div id="shot-quality" hidden><p>Отметь только проверенные критерии. Это решение по отдельной сцене, не приёмка всего фильма.</p>
 <label><input type="checkbox" data-shot-check="prompt_match">Соответствие заданию</label><br>
 <label><input type="checkbox" data-shot-check="geometry">Форма объектов без искажений</label><br>
 <label><input type="checkbox" data-shot-check="temporal">Стабильность между кадрами</label><br>
 <label><input type="checkbox" data-shot-check="cinematography">Свет, композиция и движение камеры</label><br>
 <label><input type="checkbox" data-shot-check="audio">Звук соответствует сцене</label><br>
+<div id="shot-image-check"></div>
 <label>Основания решения<textarea id="shot-notes" rows="3"></textarea></label><br>
 <button id="shot-accept">Принять сцену</button><button id="shot-reject">Отправить на доработку</button>
 </div></section>
@@ -23,10 +26,18 @@ for(let i=0;i<shotConfig.scenes;i++){const o=document.createElement('option');o.
 async function shotApi(path,payload){const r=await fetch(path,payload?{method:'POST',headers:{'X-Intake-Token':shotConfig.token},body:JSON.stringify(payload)}:{});const d=await r.json();if(!r.ok)throw Error(d.error);return d}
 async function refreshShot(){try{currentShot=await shotApi(shotBase);const labels={not_requested:'Заявка ещё не подготовлена',prepared:'Заявка подготовлена. Ожидает ограниченного запуска оператором.',running:'Генерация выполняется',needs_quality_review:'Видео получено. Нужна проверка качества.',stale_plan:'План изменился. Нужна новая заявка.',interrupted_or_failed:'Попытка остановлена. Нужна проверка причины.'};shotStatus.textContent=labels[currentShot.status]||currentShot.status;
 const ready=currentShot.status==='needs_quality_review';shotVideo.hidden=!ready;document.getElementById('shot-quality').hidden=!ready;
-if(ready){const src=shotBase+'/'+currentShot.request_id+'/video';if(shotVideo.getAttribute('src')!==src)shotVideo.src=src;
+const imageCheck=document.getElementById('shot-image-check');
+if((currentShot.required_checks||[]).includes('first_frame_match')){if(!imageCheck.firstChild){const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.dataset.shotCheck='first_frame_match';label.append(input,document.createTextNode('Начальный кадр соответствует изображению-референсу'));imageCheck.append(label)}}else imageCheck.replaceChildren();
+document.getElementById('shot-project').hidden=!(ready&&currentShot.project_available);
+const revisionBox=document.getElementById('shot-revisions'),revisionList=document.getElementById('shot-revision-list');revisionBox.hidden=true;revisionList.replaceChildren();
+if(ready){const entries=await shotApi(shotBase+'/'+currentShot.request_id+'/revisions');revisionBox.hidden=entries.length===0;
+for(const entry of entries){const row=document.createElement('p'),label=document.createElement('span');label.textContent='Кадры '+entry.edit.start_frame+'..'+(entry.edit.start_frame+entry.edit.duration_frames-1)+', звук '+(entry.edit.source_audio==='keep'?'сохранён':'выключен')+'. ';row.append(label);
+for(const [kind,text] of [['video','Смотреть'],['project','Скачать проект']]){const link=document.createElement('a');link.href=shotBase+'/'+currentShot.request_id+'/revisions/'+entry.revision_id+'/'+kind;link.textContent=text;link.dataset.revisionKind=kind;if(kind==='project')link.download='scene-revision.zip';row.append(link,document.createTextNode(' '));}revisionList.append(row);}}
+
+if(ready){document.getElementById('shot-project').href=shotBase+'/'+currentShot.request_id+'/project';const src=shotBase+'/'+currentShot.request_id+'/video';if(shotVideo.getAttribute('src')!==src)shotVideo.src=src;
 if(currentShot.quality_review)shotStatus.textContent+=' '+(currentShot.quality_review.decision==='accept_shot'?'Сцена принята отдельно.':'Нужна доработка сцены.');}
 }catch(e){shotStatus.textContent=e.message}}
-document.getElementById('shot-prepare').onclick=async()=>{try{const scene=Number(document.getElementById('shot-scene').value);if(!preparedShotPayload||preparedShotPayload.scene_index!==scene)preparedShotPayload={request_id:crypto.randomUUID(),expected_revision:shotConfig.revision,packet_sha256:shotConfig.packet,scene_index:scene,seed:137};await shotApi(shotBase,preparedShotPayload);await refreshShot()}catch(e){shotStatus.textContent=e.message}};
+document.getElementById('shot-prepare').onclick=async()=>{try{const scene=Number(document.getElementById('shot-scene').value);if(!preparedShotPayload||preparedShotPayload.scene_index!==scene)preparedShotPayload={request_id:crypto.randomUUID(),expected_revision:shotConfig.revision,packet_sha256:shotConfig.packet,scene_index:scene,seed:137};if(shotConfig.image_asset_id)preparedShotPayload.image_asset_id=shotConfig.image_asset_id;await shotApi(shotBase,preparedShotPayload);await refreshShot()}catch(e){shotStatus.textContent=e.message}};
 document.getElementById('shot-refresh').onclick=refreshShot;
 async function decideShot(decision){try{const checks={};document.querySelectorAll('[data-shot-check]').forEach(e=>checks[e.dataset.shotCheck]=e.checked);const notes=document.getElementById('shot-notes').value;const body={output_sha256:currentShot.output_sha256,decision,checks,notes};const fingerprint=JSON.stringify(body);if(!qualityPayload||qualityPayload.fingerprint!==fingerprint)qualityPayload={fingerprint,body:{...body,request_id:crypto.randomUUID()}};await shotApi(shotBase+'/'+currentShot.request_id+'/review',qualityPayload.body);await refreshShot()}catch(e){shotStatus.textContent=e.message}}
 document.getElementById('shot-accept').onclick=()=>decideShot('accept_shot');

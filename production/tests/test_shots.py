@@ -76,6 +76,51 @@ class BoundShot(unittest.TestCase):
         return execute_shot(self.root,self.ident,self.request['request_id'],grant or self.grant,
             self.lease_path,self.root/'guard',self.root/'secret',execute_authorized=True)
 
+    def prepare_image_order(self, size=(640,352)):
+        from PIL import Image
+        path=self.root/'first-frame.png';Image.new('RGB',size,'red').save(path)
+        with path.open('rb') as stream:asset=self.intake.upload('first-frame.png',stream,path.stat().st_size)
+        self.order=self.intake.create({'request_id':str(uuid4()),'mode':'new_video',
+            'brief':'Animate exact first frame','references':[asset['id']]})
+        self.ident=self.order['id'];prepare_order(self.root,self.ident)
+        self.packet=order_evidence(self.root,self.ident)
+        plan=copy.deepcopy(self.plan_request)
+        plan.update(request_id=str(uuid4()),packet_sha256=self.packet['packet_sha256'])
+        save_plan(self.root,self.ident,plan)
+        self.accept.update(request_id=str(uuid4()),packet_sha256=self.packet['packet_sha256'])
+        save_plan_review(self.root,self.ident,self.accept)
+        self.request.update(request_id=str(uuid4()),packet_sha256=self.packet['packet_sha256'],image_asset_id=asset['id'])
+        return asset
+
+    def test_image_request_binds_reference_derivative_and_explicit_quality(self):
+        from production.shots import image_file, recipe_plan
+        from production.core import Runtime
+        self.prepare_image_order()
+        self.prepared=prepare_shot(self.root,self.ident,self.request)
+        self.assertEqual(self.prepared,prepare_shot(self.root,self.ident,self.request))
+        self.assertEqual(self.prepared['recipe'],'ltx25-i2v')
+        plan=recipe_plan(self.prepared,'http://127.0.0.1:8188')
+        self.assertEqual(plan['workflow_sha256'],self.prepared['workflow_sha256'])
+        self.grant['request_sha256']=self.prepared['request_sha256']
+        result=self.execute()
+        review={'request_id':str(uuid4()),'output_sha256':result['output_sha256'],
+                'decision':'accept_shot','checks':dict.fromkeys(CHECKS,True),'notes':'Synthetic structural test'}
+        with self.assertRaisesRegex(ProductionError,'Every quality'):
+            review_shot(self.root,self.ident,self.request['request_id'],review)
+        review['checks']['first_frame_match']=True
+        self.assertEqual(review_shot(self.root,self.ident,self.request['request_id'],review)['decision'],'accept_shot')
+        path=image_file(self.root,self.ident,self.prepared,Runtime(30));path.write_bytes(b'changed')
+        with self.assertRaises(ProductionError):prepare_shot(self.root,self.ident,self.request)
+        with self.assertRaises(ProductionError):shot_file(self.root,self.ident,self.request['request_id'])
+
+    def test_image_preparation_rejects_unrelated_asset_and_implicit_crop(self):
+        self.prepare_image_order(size=(320,180))
+        with self.assertRaisesRegex(ProductionError,'aspect ratio'):
+            prepare_shot(self.root,self.ident,self.request)
+        with self.assertRaisesRegex(ProductionError,'matching static'):
+            prepare_shot(self.root,self.ident,dict(self.request,image_asset_id='0'*64))
+        self.assertEqual(self.calls,[])
+
     def test_preparation_is_idempotent_and_never_spends(self):
         self.assertEqual(self.prepared,prepare_shot(self.root,self.ident,self.request))
         self.assertFalse(self.prepared['generation_authorized']);self.assertEqual(self.calls,[])

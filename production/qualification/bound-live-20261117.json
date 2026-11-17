@@ -1,0 +1,239 @@
+{
+  "date": "2026-11-17",
+  "scope": "prepared order through real generation, playback and editable on-server scene preview",
+  "technical_status": "passed",
+  "full_system_ready": false,
+  "artistic_accepted": false,
+  "finished_video_accepted": false,
+  "tests": {
+    "total": 129,
+    "seconds": 108.448,
+    "new": 6
+  },
+  "order_id": "41981498-9965-4fd7-a873-f78f5695c0a8",
+  "prompt_id": "59bf1a9f-917b-44d9-9561-6ca0e4cbadf1",
+  "output": {
+    "bytes": 694719,
+    "sha256": "bd7e779a7972a4e040b5115e4933ac4db11b3506bd8e174b5334302fd379180b",
+    "frames": 121,
+    "fps": 24,
+    "width": 1280,
+    "height": 704,
+    "duration": 5.041667
+  },
+  "repeat_without_resubmission_verified": true,
+  "visual_review": {
+    "method": "10 sampled frames",
+    "observed": "Single red cube remains recognizably stable under forward camera movement",
+    "limits": [
+      "not all frames semantically reviewed",
+      "audio semantics not reviewed",
+      "no character identity or reference editing qualification",
+      "no customer artistic acceptance"
+    ]
+  },
+  "costs": {
+    "bound-live-stage32": {
+      "absence_confirmed_at_epoch_upper_bound": 1794934979.4729996,
+      "rental_seconds_upper_bound": 214.0739996433258,
+      "conservative_usd": 0.29732499950461916
+    },
+    "bound-live-stage33": {
+      "absence_confirmed_at_epoch_upper_bound": 1794935440.2735007,
+      "rental_seconds_upper_bound": 399.2105007171631,
+      "conservative_usd": 0.5544590287738376
+    }
+  },
+  "provider_billing_settled": false,
+  "owned_guard_services_stopped": true,
+  "active_pods": 0,
+  "live_evidence": {
+    "bound-live-stage32": {
+      "lease.json": {
+        "schema_version": 1,
+        "provider": "runpod",
+        "resource": {
+          "id": "744nkcvr2u1ei0",
+          "name": "zina-video-a501389d033f481fa11680b0a85e3c16",
+          "createdAt": "2026-11-17T16:59:25.399Z"
+        },
+        "created_at_epoch": 1794934765.399,
+        "terminate_at_epoch": 1794937465.399,
+        "budget_usd": 5,
+        "hourly_total_usd": 5,
+        "fixed_cost_usd": 0,
+        "cleanup_allowance_seconds": 120,
+        "termination_authorized": true,
+        "shared_resource": false
+      },
+      "transfer-preflight.json": {
+        "bytes_per_second": 55334830.99126368,
+        "estimated_seconds": 897.0360875022243,
+        "fits": false,
+        "sample_bytes": 67108864,
+        "sample_seconds": 1.2127779700022074
+      },
+      "model-download-report.json": {
+        "status": "failed",
+        "error_type": "TimeoutError",
+        "completed_at": 1794934970.1347077
+      },
+      "runner-cleanup.json": {
+        "lease_sha256": "2c45e3be7c84b6a51675e13c31e8e8efcecf23efc435b0a0887ba7c95a81f061",
+        "pod_id": "744nkcvr2u1ei0",
+        "status": "terminated_confirmed",
+        "provider_absence_confirmed": true,
+        "delete_attempts": 1
+      },
+      "744nkcvr2u1ei0/guard.json": {
+        "schema_version": 1,
+        "lease_sha256": "2c45e3be7c84b6a51675e13c31e8e8efcecf23efc435b0a0887ba7c95a81f061",
+        "pod_id": "744nkcvr2u1ei0",
+        "pid": 686226,
+        "process_start": "37520571",
+        "simulation": false,
+        "provider_verified": false,
+        "phase": "finished",
+        "heartbeat_at": 1794935796.6967144,
+        "terminate_at_epoch": 1794937465.399,
+        "stop_reason": "signal",
+        "cleanup_status": "terminated_confirmed"
+      },
+      "744nkcvr2u1ei0/cleanup.json": {
+        "lease_sha256": "2c45e3be7c84b6a51675e13c31e8e8efcecf23efc435b0a0887ba7c95a81f061",
+        "pod_id": "744nkcvr2u1ei0",
+        "status": "terminated_confirmed",
+        "provider_absence_confirmed": true,
+        "delete_attempts": 0
+      }
+    },
+    "bound-live-stage33": {
+      "lease.json": {
+        "schema_version": 1,
+        "provider": "runpod",
+        "resource": {
+          "id": "canyfh021h11gg",
+          "name": "zina-video-d1ebcc0a994149b3ad48b8d6f15640a7",
+          "createdAt": "2026-11-17T17:04:01.063Z"
+        },
+        "created_at_epoch": 1794935041.063,
+        "terminate_at_epoch": 1794937741.063,
+        "budget_usd": 5,
+        "hourly_total_usd": 5,
+        "fixed_cost_usd": 0,
+        "cleanup_allowance_seconds": 120,
+        "termination_authorized": true,
+        "shared_resource": false
+      },
+      "transfer-preflight.json": {
+        "bytes_per_second": 62335184.980316564,
+        "estimated_seconds": 796.2973128366245,
+        "fits": true,
+        "sample_bytes": 67108864,
+        "sample_seconds": 1.0765808110008948
+      },
+      "model-download-report.json": {
+        "started_at": 1794935278.7333536,
+        "completed_at": 1794935375.9913654,
+        "models": [
+          {
+            "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+            "expected_bytes": 21504034224,
+            "status": "verified",
+            "bytes": 21504034224,
+            "sha256": "c4279eeff115cbeaca494bd2183e7d768c38fe85a184dc6afbb7159157c44334"
+          },
+          {
+            "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+            "expected_bytes": 15372969374,
+            "status": "verified",
+            "bytes": 15372969374,
+            "sha256": "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f"
+          },
+          {
+            "path": "vae/ltx-2.5-video-vae-bf16.safetensors",
+            "expected_bytes": 1472223346,
+            "status": "verified",
+            "bytes": 1472223346,
+            "sha256": "847e14ca7f3355debca0cea4eaa24ac0fbcdf0061da054ac89ca638a869ddba3"
+          },
+          {
+            "path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+            "expected_bytes": 364866540,
+            "status": "verified",
+            "bytes": 364866540,
+            "sha256": "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5"
+          },
+          {
+            "path": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+            "expected_bytes": 995778752,
+            "status": "verified",
+            "bytes": 995778752,
+            "sha256": "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8"
+          }
+        ],
+        "status": "verified"
+      },
+      "result.json": {
+        "request_id": "cd5ca24d-cfb0-4bd4-9b3c-31c8eaa446d1",
+        "workflow_sha256": "05b720d5c8324feca25f1e193f6057533deeb1ca921b4d98d0d80316288a4d30",
+        "status": "needs_quality_review",
+        "output_sha256": "bd7e779a7972a4e040b5115e4933ac4db11b3506bd8e174b5334302fd379180b"
+      },
+      "runner-cleanup.json": {
+        "lease_sha256": "a6b4f37524dfde6903edc9f07447db676443c00951ad4539d3d076e286711c70",
+        "pod_id": "canyfh021h11gg",
+        "status": "terminated_confirmed",
+        "provider_absence_confirmed": true,
+        "delete_attempts": 0
+      },
+      "canyfh021h11gg/guard.json": {
+        "schema_version": 1,
+        "lease_sha256": "a6b4f37524dfde6903edc9f07447db676443c00951ad4539d3d076e286711c70",
+        "pod_id": "canyfh021h11gg",
+        "pid": 721681,
+        "process_start": "37548511",
+        "simulation": false,
+        "provider_verified": false,
+        "phase": "finished",
+        "heartbeat_at": 1794935796.9808547,
+        "terminate_at_epoch": 1794937741.063,
+        "stop_reason": "signal",
+        "cleanup_status": "terminated_confirmed"
+      },
+      "canyfh021h11gg/cleanup.json": {
+        "lease_sha256": "a6b4f37524dfde6903edc9f07447db676443c00951ad4539d3d076e286711c70",
+        "pod_id": "canyfh021h11gg",
+        "status": "terminated_confirmed",
+        "provider_absence_confirmed": true,
+        "delete_attempts": 0
+      },
+      "playback/result.json": {
+        "status": "passed",
+        "playback": {
+          "duration": 5.041667,
+          "width": 1280,
+          "height": 704,
+          "ended": true,
+          "error": null
+        },
+        "page_errors": [],
+        "semantic_audio_reviewed": false,
+        "artistic_accepted": false,
+        "finished_video_accepted": false
+      },
+      "edit/render/render.json": {
+        "output_sha256": "18068723f8418aa0f585a285a7bd8748d708c90c85b3ec3ffc51b557adabcf23",
+        "technical_checks": {
+          "decodes": true,
+          "dimensions": true,
+          "frames": true,
+          "duration": true,
+          "audio_stream": true,
+          "qr_payloads": true
+        },
+        "status": "needs_review"
+      }
+    }
+  }
+}

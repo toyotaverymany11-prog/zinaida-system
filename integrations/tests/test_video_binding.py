@@ -38,3 +38,8 @@ class BindingTests(unittest.TestCase):
         with self.assertRaises(ValueError):module.prepare(path,**self.args)
         self.assertFalse(path.exists());path.symlink_to(self.db)
         with self.assertRaises(ValueError):module.prepare(path,**self.args)
+
+    def test_active_employee_assignment_is_explicit(self):
+        with closing(sqlite3.connect(self.db)) as db:
+            db.execute("INSERT INTO users VALUES('staff','employee',1)");db.execute("UPDATE team_tasks SET assignee_user_id='staff'");db.commit()
+        self.assertEqual(module.prepare(self.db,**self.args),self.args)

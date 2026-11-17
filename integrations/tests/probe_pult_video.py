@@ -24,6 +24,8 @@ async def main(stage):
     from production.pult_export import export_once, read_snapshot
     from video_routes import install
     from video_binding import prepare
+    from video_media import install as install_media
+    from video_refresh import refresh_once
     from playwright.async_api import async_playwright
 
     report = {'tests': [], 'environment': 'isolated synthetic HTTPS app',
@@ -59,10 +61,18 @@ async def main(stage):
         check('explicit_binding_from_real_pult_schema',link['task_id']==task_id)
         source_before = hashlib.sha256((root/'video/intake.sqlite3').read_bytes()).hexdigest()
         cache = root/'projection'; cache.mkdir(mode=0o700)
-        published = export_once(root/'video', cache, link)
+        published = refresh_once(root/'pult-state/pult.sqlite3',root/'video',cache,link)
         check('bounded_export_observed', published['state']=='observed')
         (root/'video').rename(root/'source-offline')
         check('web_source_unavailable', not (root/'video').exists())
+        with store.db() as db:db.execute('UPDATE team_tasks SET revision=2 WHERE id=?',(task_id,))
+        try:
+            refresh_once(root/'pult-state/pult.sqlite3',root/'source-offline',cache,link)
+            raise AssertionError('revoked_binding_refreshed')
+        except ValueError:
+            check('refresh_invalidates_revoked_binding',read_snapshot(cache,link) is None)
+        with store.db() as db:db.execute('UPDATE team_tasks SET revision=1 WHERE id=?',(task_id,))
+        refresh_once(root/'pult-state/pult.sqlite3',root/'source-offline',cache,link)
         flags = {'mode': 'normal', 'reads': 0}
         def loader(binding):
             flags['reads'] += 1
@@ -79,6 +89,18 @@ async def main(stage):
             data['private_unexpected'] = 'MUST NOT LEAK'
             return data
         install(app, store, {task_id: link}, loader)
+        media_state={'revoked':False,'calls':0,'tampered':False}
+        revision='d'*64
+        video_bytes=(stage/'media-test.mp4').read_bytes() if (stage/'media-test.mp4').exists() else None
+        def produce_media(expected,rev,kind):
+            media_state['calls']+=1
+            if media_state['revoked']:raise ValueError('plan_revoked')
+            if kind=='catalog':return {'binding':link,'current':True,'versions':[{'revision':revision,'kinds':['video','project']}] if video_bytes else []}
+            if rev!=revision:raise ValueError('unknown_revision')
+            data=video_bytes if kind=='video' else b'PK\x05\x06'+b'\0'*18
+            return {'binding':link,'revision':revision,'kind':kind,'current':True,'data':data,
+                    'sha256':('0'*64 if media_state['tampered'] else hashlib.sha256(data).hexdigest())}
+        install_media(app,store,{task_id:link},produce_media)
         cert, key = root/'cert.pem', root/'key.pem'
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
                         '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],
@@ -121,6 +143,25 @@ async def main(stage):
                 await asyncio.sleep(0.6)
                 flags['mode']='revoke';check('session_revoked_during_read',(await get(cookies))[0]==401)
                 flags['mode']='normal'; token=store.session('owner-probe');cookies={COOKIE:token}
+                if video_bytes:
+                    url=endpoint+'/media/'+revision+'/video'
+                    before=media_state['calls']
+                    async with client.get(url) as r:check('media_anonymous_denied',r.status==401)
+                    async with client.get(url,cookies={COOKIE:store.session('staff-probe')}) as r:check('media_unassigned_staff_denied',r.status==403)
+                    check('media_no_producer_before_auth',before==media_state['calls'])
+                    async with client.get(url,cookies=cookies,headers={'Range':'bytes=0-31'}) as r:
+                        check('media_range_exact',r.status==206 and await r.read()==video_bytes[:32])
+                    async with client.get(url,cookies=cookies,headers={'Range':'bytes=999999999-'}) as r:check('media_invalid_range',r.status==416)
+                    media_state['tampered']=True
+                    async with client.get(url,cookies=cookies) as r:check('media_hash_mismatch_denied',r.status==409)
+                    media_state['tampered']=False;media_state['revoked']=True
+                    async with client.get(url,cookies=cookies) as r:check('media_revoked_plan_denied',r.status==409)
+                    media_state['revoked']=False
+                    with store.db() as db:db.execute("UPDATE team_tasks SET assignee_user_id='staff-probe' WHERE id=?",(task_id,))
+                    async with client.get(url,cookies={COOKIE:store.session('staff-probe')}) as r:check('media_assigned_staff_allowed',r.status==200 and await r.read()==video_bytes)
+                    check('metadata_assigned_staff_allowed',(await get({COOKIE:store.session('staff-probe')}))[1]['state']=='observed')
+                    with store.db() as db:db.execute("UPDATE team_tasks SET assignee_user_id='owner-probe' WHERE id=?",(task_id,))
+                    async with client.get(url,cookies={COOKIE:store.session('staff-probe')}) as r:check('media_unassigned_again_denied',r.status==403)
 
             async with async_playwright() as p:
                 browser=await p.chromium.launch(headless=True, args=['--no-sandbox'])
@@ -138,6 +179,15 @@ async def main(stage):
                         check('no_overflow_'+str(width),await page.evaluate('document.documentElement.scrollWidth<=innerWidth'))
                         await page.reload();await page.get_by_text('Состояние заказа прочитано',exact=True).wait_for()
                         check('reload_'+str(width),await panel.count()==1)
+                        if video_bytes:
+                            video=panel.locator('video');await video.wait_for()
+                            await video.evaluate('(v)=>{v.muted=true;return v.play()}')
+                            await video.evaluate('(v)=>new Promise((resolve,reject)=>{if(v.ended)return resolve();const timer=setTimeout(()=>reject(new Error("playback_timeout")),12000);v.addEventListener("ended",()=>{clearTimeout(timer);resolve()},{once:true})})')
+                            check('protected_video_played_'+str(width),await video.evaluate('(v)=>v.error===null && v.ended'))
+                            async with page.expect_download() as download:
+                                await panel.get_by_text('Скачать монтажный комплект',exact=True).click()
+                            file=await (await download.value).path()
+                            check('protected_project_download_'+str(width),Path(file).read_bytes()==b'PK\x05\x06'+b'\0'*18)
                         await panel.screenshot(path=str(stage/('panel-'+str(width)+'.png')))
                         await context.close()
                     check('no_javascript_errors',not errors)

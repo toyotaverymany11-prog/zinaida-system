@@ -23,6 +23,8 @@ def prepare(database, *, task_id, task_revision, owner_id, order_id, order_finge
             raise ValueError('active_owner_required')
         if not row or row[0]!=task_revision or row[1]!=owner_id:
             raise ValueError('task_binding_mismatch')
-        if row[2]!=owner_id or row[3]!='human':
+        assignee=db.execute('SELECT role,active FROM users WHERE id=?',(row[2],)).fetchone()
+        if row[3]!='human' or not assignee or assignee[1]!=1 or not (
+                (row[2]==owner_id and assignee[0]=='owner') or assignee[0]=='employee'):
             raise ValueError('owner_human_task_required')
     return link

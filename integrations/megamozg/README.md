@@ -1,109 +1,33 @@
-# Video orders in the existing Megamozg workboard
+# Video production in Megamozg
 
-Status: isolated integration verified; not installed in the shared service.
+Status: owner route installed and verified at the public pult on17November2026.
+Read DEPLOYMENT.md for exact files, limits, rollout, rollback and evidence.
 
-Before work read `/opt/zinaida/coordination/README.md` and the shared registry.
-GPU, editable packages and CPU revisions belong to PR2; this branch owns only
-integration modules. Shared service deployment is reserved to the Megamozg
-stream until outstanding operations are reconciled. The registry is cooperative,
-not automatic visibility of private chat transcripts.
+The pult owns identity, assignments and tasks. Video production owns source
+materials, scene versions, render attempts and artistic review. The web process
+has no access to source directories: a private Unix producer returns current
+metadata or verified immutable media. Each request runs in one bounded child;
+only the pult OS UID can connect. Web authorization is rechecked after reads.
 
-`video_binding.prepare` now prepares the explicit task/owner/revision link from
-a read-only pult DB. Only an active owner and a human task assigned to that same
-owner qualify in this stage. It creates no task, writes no DB and never guesses
-the intended task. The separately reviewed order fingerprint remains mandatory;
-the exporter verifies it against the video source. Installation and runtime
-checks are still required; this is not a staff-access grant.
+Supported: bound order status, plan revision, exact-version video playback and
+byte-range delivery, editable ZIP download, owner or currently assigned human
+employee, revoked assignment/session/task-version rejection. Media access never
+renders or starts a model. Task revision changes deliberately require a reviewed
+rebind. This does not automatically approve a scene or a finished film.
 
-The common pult owns coordination, identity and assignment. The video project
-owns orders, assets, scene plans, attempts and production decisions. GPT/Codex
-and Hermes remain replaceable permitted execution routes. Reading a card never
-starts a model, a renderer, a paid request or a second queue.
+Grok subscription generation is separately qualified by one actual OAuth request
+and verified MP4. grok_subscription.py is an operator-only no-repeat wrapper;
+API-key fallback and durable public storage are absent. Employee account use
+and automatic inference from the card are not enabled by this qualification.
 
-`production.pult_link.collect` reads a single bound order using SQLite `mode=ro`
-and `query_only`. Do not use `Intake` to read real production data: its constructor
-creates directories, tables and migrations. The projection includes only stage
-states, observation time, plan revision and a limited recorded review status.
-No source brief, paths, tokens, output URLs or review notes are returned.
+Evidence:32 contract tests locally/server;44 isolated real HTTPS/Chromium checks;
+3 additional Grok no-repeat/auth tests. Public browser: standard login, same card
+after reload, actual3-second CPU revision played to ended=true, ZIP SHA matched.
+Physical iPad and a real employee account remain independent acceptance work.
 
-`video_routes.install(app, store, bindings, loader)` adds one GET endpoint beside
-the existing workboard task. It reuses the real session/identity checks before
-source access and after the read. Only the bound human owner is admitted in this
-phase; employee and agent paths are denied. A task revision change invalidates
-the link. A future trusted rebind operation must distinguish changed requirements
-from routine progress, without accepting a caller-supplied source root.
-
-`video_panel.js` is inserted into the existing workboard closure before `open`;
-call `await videoPanel(t,root,generation)` before `attachmentPanel`. It uses the
-existing card generation guard, so a delayed response cannot replace a new card.
-There is no standalone competing web application.
-
-The loader is a trusted dependency. `production.pult_export.export_once` now
-collects in a separate process with a 3-second timeout and a nonblocking lock.
-It atomically publishes a whitelist JSON of at most 4096 bytes. The pult loader
-uses `read_snapshot(cache, link, trusted_uid=producer_uid)` without access to the
-source database. The reader rejects symlinks, nonregular files, wrong ownership,
-writeable group/world permissions, malformed or oversized content. A failed
-collection publishes unavailable. A failed atomic replacement preserves the old
-snapshot only until its original expiry; file reads never refresh its timestamp.
-
-The cache directory must belong to the producer, have no group/world write,
-and use a setgid reader group (for example mode2750). Published files have0640
-even under umask077. Do not grant that group access to the source directory.
-Use the same reviewed binding for export and the web route. One-shot CLI:
-
-```bash
-python3 -m production.pult_export export --source-root /trusted/video \
-  --cache-directory /trusted/metadata < /trusted/reviewed-binding.json
-```
-
-The route permits one in-flight metadata read; after an HTTP timeout
-its slot remains occupied until the actual read finishes. This prevents growing
-queues of filesystem threads, but does not promise to terminate an OS I/O hang.
-No scheduled exporter, shared permission change or authentication bridge is
-installed by this patch. These are prerequisites to a production installation.
-
-Recorded plan acceptance is explicitly unverified: this projection does not
-rehash all current evidence or authenticate the original local reviewer. It
-cannot mark a shot or film accepted. Age above 180 seconds is shown as stale;
-missing, changed and unavailable sources remain distinct from a successful read.
-
-## Verified scope
-
-21 contract tests pass on the local workspace and server. The probe uses a copy
-of the installed pult, an empty disposable state, synthetic identities, real
-loopback HTTPS and Chromium at 1024/390 px. 28 assertions cover authentication,
-foreign owner/staff denial, revoked sessions during reads, stale task bindings,
-expired/unavailable snapshots, single-flight timeout behavior, visible card,
-reload, mobile width, unchanged video DB and no model or execution jobs. The
-source directory is deliberately moved away after publication: the complete
-browser test reads only the exported metadata. A real-order check separately
-confirmed the actual megamozg-pult OS user can read metadata and cannot read
-the source DB, whose bytes remained unchanged. No real pult task was created.
-
-Run the probe only on an isolated stage containing `source` and a source-only
-`pult` copy with the panel inserted. Never point it at production state:
-
-```bash
-python3 -m unittest production.tests.test_pult_link production.tests.test_pult_export -v
-python3 integrations/tests/probe_pult_video.py /absolute/isolated/stage
-```
-
-The probe's temporary certificate and fake login apply only to its random
-loopback listener. It does not modify any deployed authentication or service.
-
-## Next acceptance
-
-1. Reviewed refresh lifecycle and explicit owner binding on a real task; verify
-   installed-file admission manifests before changing shared pult code. The
-   one-shot exporter is verified, but it does not install a timer or public route.
-2. Protected exact-version MP4 playback/download with current task and project
-   permissions, size limits, hashes, range requests and revocation. Existing
-   pult attachment support for TXT/PDF/images up to 2 MiB is insufficient.
-3. One CPU video order, one targeted revision, repeat login and human review.
-4. Separate Grok capability qualification using the actual subscribed account;
-   CLI OAuth/billing does not establish video support. Do not silently switch
-   to metered API or give employees the owner's account.
-
-The other development chat retains GPU allocation, throughput and rental code.
-This branch adds files only and must not move its active PR head.
+Before edits read /opt/zinaida/coordination/README.md and registry.json. PR2 owns
+GPU, allocation, scene edits and packages. This branch owns the portal adapter.
+Do not move PR2 or restart Hermes. The common entry point and workboard script
+were changed only after recorded reconciliation and backups. The original49
+admission pins and model flags passed unchanged. No background developer runs;
+the enabled read-only producer is an ordinary bounded-operation service.

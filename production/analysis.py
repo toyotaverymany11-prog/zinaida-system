@@ -67,16 +67,25 @@ def bundle(root, packet, folder, runtime):
                             'sample_times': [frames[k]['time_seconds'] for k in selected],
                             'video_format': ref.get('video_format', []),
                             'detected_shots': ref['detected_shots']})
-    for i, asset in enumerate(packet['order']['characters']):
+    stills = [('still-reference', i, asset, 'still_reference')
+              for i, asset in enumerate(packet['order']['references']) if asset['kind'] == 'image']
+    characters = [('character', i, asset, 'character_reference')
+                  for i, asset in enumerate(packet['order']['characters'])]
+    for prefix, i, asset, role in stills + characters:
         runtime.check()
         source = local_asset(root, 'assets/'+asset['id'])
         if digest(source, runtime) != asset['id']:
-            raise ProductionError('Character image changed')
-        target = folder / f'character-{i}.jpg'
+            raise ProductionError('Reference image changed')
+        target = folder / f'{prefix}-{i}.jpg'
         with Image.open(source) as im:
-            ImageOps.contain(ImageOps.exif_transpose(im).convert('RGB'), (1200, 1200)).save(target, quality=90)
+            converted = ImageOps.exif_transpose(im).convert('RGB')
+            if role == 'still_reference':
+                converted.thumbnail((1200, 1200))
+            else:
+                converted = ImageOps.contain(converted, (1200, 1200))
+            converted.save(target, quality=90)
         images.append(target)
-        descriptors.append({'image_number': len(images), 'type': 'character_reference', 'asset_id': asset['id']})
+        descriptors.append({'image_number': len(images), 'type': role, 'asset_id': asset['id']})
     if len(images) > 24:
         raise ProductionError('Analysis accepts at most 24 image attachments')
     order = packet['order']

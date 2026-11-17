@@ -1,6 +1,7 @@
 // Insert inside the existing workboard closure; use the same identity and routing.
 async function videoPanel(t,root,generation){
- if(me.role!=='owner')return;
+ root.dataset.videoTaskId=t.id;root.dataset.videoTaskRevision=String(t.revision);
+ if(!['owner','employee'].includes(me.role))return;
  const panel=node('section','');panel.dataset.videoObservation='true';root.append(panel);
  let d;try{d=await call('/api/workboard/tasks/'+encodeURIComponent(t.id)+'/video')}
  catch(e){if(generation===detailGeneration&&panel.isConnected)panel.append(node('p','Состояние видео недоступно'));return}
@@ -18,4 +19,15 @@ async function videoPanel(t,root,generation){
   panel.append(node('p',review[d.plan_review]||review.not_observed));
  }
  panel.append(node('p','Приёмка готового фильма этим состоянием не подтверждается.'));
+ if(d.state==='observed'){
+  let media;try{media=await call('/api/workboard/tasks/'+encodeURIComponent(t.id)+'/video/media')}
+  catch(e){return}
+  if(generation!==detailGeneration||!panel.isConnected)return;
+  for(const item of media.versions||[]){
+   const base='/api/workboard/tasks/'+encodeURIComponent(t.id)+'/video/media/'+encodeURIComponent(item.revision);
+   panel.append(node('p','Версия '+item.revision.slice(0,12)));
+   if(item.kinds.includes('video')){const video=node('video','');video.controls=true;video.preload='metadata';video.style.maxWidth='100%';video.src=base+'/video';panel.append(video)}
+   if(item.kinds.includes('project')){const link=node('a','Скачать монтажный комплект');link.href=base+'/project';panel.append(link)}
+  }
+ }
 }
