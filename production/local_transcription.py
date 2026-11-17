@@ -17,7 +17,7 @@ MODEL_SHA = {
 }
 
 
-def transcribe(root, order_id, python, model_path, model='small', timeout=180):
+def transcribe(root, order_id, python, model_path, model='small', timeout=180, runtime=None):
     ident=str(UUID(order_id))
     intake=Intake(root)
     with intake.connect() as db:
@@ -36,7 +36,7 @@ def transcribe(root, order_id, python, model_path, model='small', timeout=180):
         return previous
     if model not in MODEL_SHA or not model_path.is_file() or digest(model_path)!=MODEL_SHA[model]:
         raise ProductionError('Expected official cached Whisper weights; automatic download is disabled')
-    runtime=Runtime(timeout)
+    runtime=runtime or Runtime(timeout)
     source=intake.root/'assets'/asset['id']
     duration=float(probe(source,runtime)['format'].get('duration',0))
     if not 0<duration<=120:

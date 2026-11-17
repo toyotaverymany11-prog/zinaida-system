@@ -157,6 +157,14 @@ class Intake:
         with self.connect() as db:
             orders=[json.loads(r[0]) for r in db.execute('SELECT data FROM orders ORDER BY rowid DESC LIMIT 50')]
         for order in orders:
+            fingerprint=object_digest(order)
+            receipt=self.root/'preparations'/order['id']/'receipt.json'
+            if receipt.is_file():
+                data=json.loads(receipt.read_text())
+                if data.get('order_sha256')==fingerprint:
+                    order['preparation']={'status':data['status'],
+                        'reference_count':len(data.get('reference_evidence',[])),
+                        'blocker':data.get('blocker')}
             transcript=self.root/'transcripts'/f"{order['id']}.json"
             if order.get('voice') and transcript.is_file():
                 data=json.loads(transcript.read_text())
