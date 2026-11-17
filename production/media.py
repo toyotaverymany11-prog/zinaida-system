@@ -34,8 +34,10 @@ def inspect_video(source: Path, output: Path, runtime=None, max_samples=24):
         raise ProductionError("Invalid frame rate")
     output.mkdir(parents=True, exist_ok=False)
     (output / "frames").mkdir()
+    # Current FFmpeg removed -vsync; older supported installations lack -fps_mode.
+    sync_option = "-fps_mode" if "-fps_mode" in runtime.run(ffmpeg("-h", "full")) else "-vsync"
     runtime.run(ffmpeg("-i", source, "-an", "-vf",
-                        "format=rgb24,select='gt(scene,0.3)',metadata=print:file=cuts.txt", "-vsync", "vfr",
+                        "format=rgb24,select='gt(scene,0.3)',metadata=print:file=cuts.txt", sync_option, "vfr",
                         "-f", "null", "-"), cwd=output)
     cuts = sorted(set(float(x) for x in re.findall(r"pts_time:([0-9.]+)",
                         (output / "cuts.txt").read_text()) if 0 < float(x) < duration))
