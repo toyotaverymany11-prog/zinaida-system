@@ -1,0 +1,66 @@
+{
+  "status": "technical_i2v_execution_verified_artistic_unqualified",
+  "pod_id": "sja37vqhs8cdqk",
+  "order_id": "9b713108-b01c-492f-a576-c5b3669f11eb",
+  "request_id": "87cfb193-8f2d-4ff7-bc55-55bfe8593917",
+  "source_image": {
+    "asset_id": "efb9058896fa83be7dae7b10eb8bb20c6aa3bc3cf6a53d8289e4e94f14531af3",
+    "sha256": "38b465f6d98aaa04ed3b722517443140cfc3fc5d30b2460e885a2fd652c5967b",
+    "filename": "38b465f6d98aaa04ed3b722517443140cfc3fc5d30b2460e885a2fd652c5967b.png",
+    "width": 1280,
+    "height": 704,
+    "transform": "exif_transpose_rgb_png_no_crop"
+  },
+  "workflow_sha256": "b8dfac228fa75a9f22c9a76ecb99425d336e645921da912e0aa9507b1f6f40c5",
+  "output_sha256": "e2428d4df5a0b3445e7e4de9017b30a26c73a0f97c782a1fbab4ef196c37772a",
+  "video": {
+    "width": 1280,
+    "height": 704,
+    "avg_frame_rate": "24/1",
+    "nb_frames": "121",
+    "duration": "5.041667"
+  },
+  "cleanup": {
+    "lease_sha256": "3cb638be639ea5dbee5dac7d939841ba8ff0bbf9523ee09377e5004578174385",
+    "pod_id": "sja37vqhs8cdqk",
+    "status": "terminated_confirmed",
+    "provider_absence_confirmed": true,
+    "delete_attempts": 0
+  },
+  "browser": {
+    "status": "passed",
+    "playback": {
+      "duration": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "ended": true,
+      "error": null
+    },
+    "page_errors": [],
+    "image_reference_visible": true,
+    "semantic_audio_reviewed": false,
+    "artistic_accepted": false,
+    "finished_video_accepted": false
+  },
+  "repeat": {
+    "status": "passed",
+    "cloud_control_constructed": false,
+    "output_sha256": "e2428d4df5a0b3445e7e4de9017b30a26c73a0f97c782a1fbab4ef196c37772a"
+  },
+  "first_frame": {
+    "ssim": 0.990795,
+    "scope": "first_decoded_frame_vs_reference_only",
+    "identity_qualified": false,
+    "artistic_accepted": false
+  },
+  "elapsed_to_cleanup_receipt_seconds": 382.59700202941895,
+  "conservative_rental_estimate_usd": 0.5313847250408597,
+  "settled_bill": false,
+  "limitations": [
+    "Simple cube scene only; five sampled output frames inspected",
+    "No face/body/animal identity qualification",
+    "Audio semantic and final artistic review pending",
+    "One reference at fixed aspect ratio; no implicit crop"
+  ],
+  "server_evidence": "/opt/zinaida/staging/video-production-worker-20261117/i2v-live-stage38"
+}

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "recipe": "ltx25-t2v",
+  "status": "cpu_inventory_checked_gpu_unqualified",
+  "repo_id": "Lightricks/LTX-2.5",
+  "revision": "49b093a39c19169a8a81721dcc541e07e945232f",
+  "models": [
+    {
+      "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+      "bytes": 21504034224,
+      "sha256": "c4279eeff115cbeaca494bd2183e7d768c38fe85a184dc6afbb7159157c44334"
+    },
+    {
+      "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+      "bytes": 15372969374,
+      "sha256": "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f"
+    },
+    {
+      "path": "vae/ltx-2.5-video-vae-bf16.safetensors",
+      "bytes": 1472223346,
+      "sha256": "847e14ca7f3355debca0cea4eaa24ac0fbcdf0061da054ac89ca638a869ddba3"
+    },
+    {
+      "path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+      "bytes": 364866540,
+      "sha256": "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5"
+    },
+    {
+      "path": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+      "bytes": 995778752,
+      "sha256": "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8"
+    }
+  ],
+  "total_model_bytes": 39709872236,
+  "workflow_sha256": "7dd2341577a1a814466ac9b8927f37a76e7e5ca377558948d5aa3f017880a7c9",
+  "source": {
+    "repository": "https://github.com/Comfy-Org/workflow_templates",
+    "commit": "37da976016cf4a83105e66280f916d13fabc25ac",
+    "path": "templates/video_ltx2_5_t2v.json",
+    "sha256": "eb1a415a467a2ef1ea63cdb4e79a35315e29c971b1e4f7646ed149a2971fdbd7",
+    "license": "MIT"
+  },
+  "runtime": {
+    "comfy_commit": "ee34406f56f84f6bc89996b8b77a4bedec98a2b9",
+    "comfyui-frontend-package": "1.59.1",
+    "transformers": "5.23.0",
+    "huggingface-hub": "2.4.0",
+    "pydantic": "2.14.3",
+    "note": "Versions observed in isolated CPU environment, not a clean GPU dependency lock."
+  },
+  "changes": [
+    "Exported through official frontend graphToPrompt",
+    "Resolved constant false prompt enhancer switch; retained SaveVideo dependencies only",
+    "Replaced sample text with required caller prompt and fixed both noise seeds",
+    "No paid partner nodes, model downloads or generation"
+  ],
+  "limitations": [
+    "No GPU execution, VRAM fit, throughput or artistic acceptance measured",
+    "Native model audio is not a replacement for the four approved Fish voices",
+    "T2V only; no evidence of reference editing or persistent identity qualification",
+    "Download bytes do not represent runtime memory requirements",
+    "Separate model license/commercial eligibility review remains necessary"
+  ]
+}

@@ -19,10 +19,12 @@ class Cancelled(ProductionError):
     pass
 
 
-def digest(path: Path) -> str:
+def digest(path: Path, runtime=None) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            if runtime is not None:
+                runtime.check()
             h.update(chunk)
     return h.hexdigest()
 
@@ -75,21 +77,23 @@ def number(value, name: str, minimum=0, maximum=None):
 class Runtime:
     """One deadline across all subprocesses. Cancellation kills our process group only."""
 
-    def __init__(self, seconds=900, cancel_file: Path | None = None):
+    def __init__(self, seconds=900, cancel_file: Path | None = None, should_cancel=None):
         self.deadline = time.monotonic() + number(seconds, "timeout", 0.1, 86400)
         self.cancel_file = cancel_file
+        self.should_cancel = should_cancel
 
     def check(self):
-        if self.cancel_file and self.cancel_file.exists():
+        if ((self.should_cancel and self.should_cancel()) or
+                (self.cancel_file and self.cancel_file.exists())):
             raise Cancelled("Cancellation requested")
         if time.monotonic() >= self.deadline:
             raise Cancelled("Worker deadline exceeded")
 
-    def run(self, args: list[str], *, cwd=None, stderr=False) -> str:
+    def run(self, args: list[str], *, cwd=None, stderr=False, env=None) -> str:
         self.check()
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             proc = subprocess.Popen(args, cwd=cwd, stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=err, start_new_session=True)
+                                    stdout=out, stderr=err, start_new_session=True, env=env)
             try:
                 while proc.poll() is None:
                     self.check()

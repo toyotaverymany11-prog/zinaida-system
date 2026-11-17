@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-17",
+  "scope": "single automatic allocation to verified video and editable project",
+  "status": "passed",
+  "full_system_ready": false,
+  "artistic_accepted": false,
+  "pod_id": "mcfwyj3sqz3t1u",
+  "order_id": "41981498-9965-4fd7-a873-f78f5695c0a8",
+  "request_id": "d3f2f2c6-8e11-4c86-a138-ba550ebd65d2",
+  "source_sha256": "0707d205ceb49ace878ff3c8c1bd41f98546d0e6c5898380edc4ddcc50f3e59f",
+  "source_bytes": 694711,
+  "cleanup": {
+    "lease_sha256": "9e338b36ae838c7dc78d6017a7da521ca3d301d33ac8d78ca5ffd8655e7aec37",
+    "pod_id": "mcfwyj3sqz3t1u",
+    "status": "terminated_confirmed",
+    "provider_absence_confirmed": true,
+    "delete_attempts": 0
+  },
+  "repeat": {
+    "cloud_control_constructed": false,
+    "status": "needs_quality_review",
+    "editable_project_ready": true
+  },
+  "browser": {
+    "status": "passed",
+    "playback": {
+      "duration": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "ended": true,
+      "error": null
+    },
+    "page_errors": [],
+    "semantic_audio_reviewed": false,
+    "artistic_accepted": false,
+    "finished_video_accepted": false
+  },
+  "package": {
+    "file": "preview-project.zip",
+    "bytes": 1458276,
+    "sha256": "46758fe741b1aa53f99114602bb672517348d1dc657223f0535a8e202e95cfde",
+    "manifest_sha256": "1b03e77db1ada150b591093ae4af6e9f92d73f2b9e2305f712561b946147ee31",
+    "finished_video_accepted": false
+  },
+  "lease_seconds_to_confirmed_absence": 287.20161294937134,
+  "conservative_cost_usd": 0.3988911290963491,
+  "billing_settled": false,
+  "all_models_verified": true,
+  "source_original_unchanged": true,
+  "tests": {
+    "full_suite": 152,
+    "seconds": 219.961
+  },
+  "limitations": [
+    "Only one text-to-video scene, not source-video editing or identity qualification",
+    "Five sampled frames show one stable red cube and camera approach; audio not artistically reviewed",
+    "Employee integration and publishing remain separate"
+  ]
+}

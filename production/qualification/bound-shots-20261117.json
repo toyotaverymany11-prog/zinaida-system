@@ -1,0 +1,52 @@
+{
+  "scope": "order-to-shot binding and local quality review",
+  "tests": {
+    "suite": "production/tests",
+    "passed": 123,
+    "seconds": 96.495
+  },
+  "browser": {
+    "host": "control server, isolated staging",
+    "viewport": [
+      390,
+      844
+    ],
+    "fixture": "synthetic red clip, not GPU generation",
+    "playback_ended": true,
+    "playback_error": null,
+    "page_errors": [],
+    "failed_quality_check_blocks_acceptance": true,
+    "revoked_plan_media_http_status": 409,
+    "horizontal_overflow": false
+  },
+  "provider_calls_in_this_qualification": 0,
+  "finished_video_accepted": false,
+  "limitations": [
+    "Structural binding tests use a mock GPU; a subsequent real rental was stopped before submission due to insufficient transfer throughput.",
+    "The separate H100 pilot is not retroactively attached to this synthetic order.",
+    "Execution is a trusted owner CLI on an existing guarded exclusive rental, not an automatic HTTP spending queue.",
+    "Reference editing, character identity and final-film artistic acceptance remain unqualified."
+  ],
+  "paid_attempt": {
+    "pod_id": "3sjtiit0dls21r",
+    "data_center": "EUR-NO-2",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "compute_hourly_usd": 4.39,
+    "created_at": "2026-11-17T16:49:44.157Z",
+    "lease_seconds": 1800,
+    "budget_usd": 5,
+    "status": "aborted_before_generation",
+    "reason": "Measured model transfer too slow for original deadline",
+    "partial_bytes": 595591168,
+    "observed_at_epoch": 1794934424.1452062,
+    "order_id": "41981498-9965-4fd7-a873-f78f5695c0a8",
+    "shot_request_id": "cd5ca24d-cfb0-4bd4-9b3c-31c8eaa446d1",
+    "generation_submitted": false,
+    "termination_confirmed": true,
+    "independent_get_status": 404,
+    "delete_attempts": 1,
+    "elapsed_until_verified_seconds": 243.459,
+    "conservative_rental_estimate_usd": 0.339,
+    "billing_finalized": false
+  }
+}

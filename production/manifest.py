@@ -10,9 +10,11 @@ ROUTES = {"existing", "code", "cinematic", "character_series", "video_recast"}
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 
 
-def validate(manifest: dict, root: Path) -> dict:
+def validate(manifest: dict, root: Path, runtime=None) -> dict:
     if manifest.get("schema_version") != 1:
         raise ProductionError("Unsupported manifest schema_version")
+    if manifest.get('quality_profile', 'photorealistic') not in {'photorealistic', 'stylized', 'source_matched'}:
+        raise ProductionError('Unknown quality_profile')
     for key in ("project_id", "revision"):
         if not ID.fullmatch(str(manifest.get(key, ""))):
             raise ProductionError(f"Invalid {key}")
@@ -33,7 +35,7 @@ def validate(manifest: dict, root: Path) -> dict:
             raise ProductionError("Invalid asset ID")
         p = local_asset(root, a["path"])
         expected = a.get("sha256", "")
-        if not re.fullmatch("[0-9a-f]{64}", expected) or digest(p) != expected:
+        if not re.fullmatch("[0-9a-f]{64}", expected) or digest(p, runtime) != expected:
             raise ProductionError(f"Asset hash mismatch: {key}")
         paths[key] = p
     characters = manifest.get("characters", {})
@@ -70,6 +72,24 @@ def validate(manifest: dict, root: Path) -> dict:
         if c["route"] == "video_recast":
             if c.get("original_asset") not in assets or not c.get("characters") or not c.get("target"):
                 raise ProductionError("video_recast needs original, target and character")
+    overlaps = []
+    for i, c in enumerate(clips):
+        transition = c.get("transition_after")
+        if transition is None:
+            overlaps.append(0)
+            continue
+        if not isinstance(transition, dict) or set(transition) != {"type", "duration_frames"}:
+            raise ProductionError("Transition requires only type and duration_frames")
+        count = transition["duration_frames"]
+        if transition["type"] != "dissolve" or type(count) is not int or count <= 0:
+            raise ProductionError("Only a positive-frame dissolve is supported")
+        if i == len(clips)-1 or count >= min(c["duration_frames"], clips[i+1]["duration_frames"]):
+            raise ProductionError("Transition needs two clips with unused frames")
+        overlaps.append(count)
+    for i, c in enumerate(clips):
+        if (overlaps[i-1] if i else 0) + overlaps[i] >= c["duration_frames"]:
+            raise ProductionError("Transitions must not consume or triple-overlap a clip")
+    total -= sum(overlaps)
     if total / fps > 900:
         raise ProductionError("This worker is bounded to 15 minutes per render")
     for key in ("audio", "overlays"):
@@ -101,10 +121,15 @@ def validate(manifest: dict, root: Path) -> dict:
 
 def required_reviews(manifest):
     reviews = {"content", "artistic"}
+    if any(c['route'] in {'cinematic', 'character_series', 'video_recast'} for c in manifest['clips']):
+        reviews.add('temporal')
+        if manifest.get('quality_profile', 'photorealistic') == 'photorealistic':
+            reviews.add('photorealism')
     if any(c.get("characters") for c in manifest["clips"]):
         reviews.add("identity")
     if any(c["route"] == "video_recast" for c in manifest["clips"]):
         reviews.add("source_preservation")
+        reviews.add('contact_and_occlusion')
     if any(a.get("role") == "qr" for a in manifest.get("overlays", [])):
         reviews.add("qr")
     return sorted(reviews)
