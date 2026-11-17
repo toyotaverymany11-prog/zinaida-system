@@ -14,7 +14,7 @@ def project_file(root, ident, request_id):
     shot_file(root,ident,request_id)
     output=folder(root,ident,request_id)/'edit'
     if not output.is_dir():raise ProductionError('Project package has not been built')
-    build(root,ident,request_id,output)  # Existing-output branch only; no rendering.
+    _verify_existing(root,ident,request_id,output,Runtime(30))
     receipt=read_json(output/'project-package.json')
     path=output/'preview-project.zip'
     if receipt['manifest_sha256']!=object_digest(read_json(output/'manifest.json')) or digest(path)!=receipt['sha256']:
@@ -73,24 +73,52 @@ def package_preview(output):
     return target
 
 
+def _verify_existing(root,ident,request_id,output,runtime):
+    request=load_request(root,ident,request_id)
+    receipt=read_json(folder(root,ident,request_id)/'result.json')
+    binding={'request_sha256':request['request_sha256'],'output_sha256':receipt['output_sha256']}
+    saved=read_json(output/'binding.json')
+    if saved!=binding:raise ProductionError('Edit folder belongs to another shot')
+    report=read_json(output/'render/render.json')
+    if digest(output/'render/master.mp4',runtime)!=report['output_sha256']:
+        raise ProductionError('Rendered preview changed')
+    if digest(output/'assets/shot.mp4',runtime)!=receipt['output_sha256']:
+        raise ProductionError('Edit source changed')
+    manifest=read_json(output/'manifest.json')
+    if object_digest(manifest)!=report['manifest_sha256']:
+        raise ProductionError('Edit manifest changed')
+    return report
+
+
 def build(root, ident, request_id, output, *, timeout=180):
+    """Serialize edits and preserve interrupted attempts before a bounded retry."""
+    import fcntl
+    import uuid
+    output=Path(output).resolve()
+    output.parent.mkdir(parents=True,exist_ok=True)
+    with output.with_name(output.name+'.build.lock').open('a') as lock:
+        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:raise ProductionError('Scene edit is already active') from None
+        # Validate the current order before touching an old attempt.
+        shot_file(root,ident,request_id)
+        if output.exists() and not (output/'render/render.json').exists():
+            request=load_request(root,ident,request_id)
+            receipt=read_json(folder(root,ident,request_id)/'result.json')
+            binding={'request_sha256':request['request_sha256'],'output_sha256':receipt['output_sha256']}
+            if read_json(output/'binding.json')!=binding:
+                raise ProductionError('Incomplete edit belongs to another shot')
+            # Keep diagnostics and any partial output, never erase user content.
+            output.rename(output.with_name(output.name+'.interrupted-'+uuid.uuid4().hex))
+        return _build(root,ident,request_id,output,timeout=timeout)
+
+
+def _build(root, ident, request_id, output, *, timeout=180):
     runtime=Runtime(timeout);output=Path(output).resolve()
     request=load_request(root,ident,request_id)
     source=shot_file(root,ident,request_id)
     receipt=read_json(folder(root,ident,request_id)/'result.json')
     binding={'request_sha256':request['request_sha256'],'output_sha256':receipt['output_sha256']}
-    if output.exists():
-        saved=read_json(output/'binding.json')
-        if saved!=binding:raise ProductionError('Edit folder belongs to another shot')
-        report=read_json(output/'render/render.json')
-        if digest(output/'render/master.mp4',runtime)!=report['output_sha256']:
-            raise ProductionError('Rendered preview changed')
-        if digest(output/'assets/shot.mp4',runtime)!=receipt['output_sha256']:
-            raise ProductionError('Edit source changed')
-        manifest=read_json(output/'manifest.json')
-        if object_digest(manifest)!=report['manifest_sha256']:
-            raise ProductionError('Edit manifest changed')
-        return report
+    if output.exists():return _verify_existing(root,ident,request_id,output,runtime)
     info=probe(source,runtime)
     video=next((s for s in info['streams'] if s['codec_type']=='video'),None)
     if not video:raise ProductionError('Generated file has no video')

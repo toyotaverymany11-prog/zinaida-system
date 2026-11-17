@@ -64,3 +64,35 @@ class ShotEdit(unittest.TestCase):
         with self.assertRaisesRegex(ProductionError,'package changed'):
             project_file(self.case.root,self.case.ident,self.case.request['request_id'])
         self.assertFalse(shot_state(self.case.root,self.case.ident)['project_available'])
+
+    def test_interrupted_render_retries_and_keeps_diagnostics(self):
+        from unittest.mock import patch
+        with patch('production.shot_edit.render',side_effect=ProductionError('interrupted')):
+            with self.assertRaisesRegex(ProductionError,'interrupted'):self.build()
+        self.assertTrue((self.output/'binding.json').exists())
+        result=self.build()
+        self.assertTrue(all(result['technical_checks'].values()))
+        attempts=list(self.output.parent.glob('edit.interrupted-*'))
+        self.assertEqual(len(attempts),1)
+        self.assertTrue((attempts[0]/'manifest.json').exists())
+
+    def test_read_only_delivery_never_recovers_or_renders(self):
+        from unittest.mock import patch
+        from production.shots import folder
+        from production.shot_edit import project_file
+        self.output=folder(self.case.root,self.case.ident,self.case.request['request_id'])/'edit'
+        with patch('production.shot_edit.render',side_effect=ProductionError('interrupted')):
+            with self.assertRaises(ProductionError):self.build()
+        with patch('production.shot_edit.render') as render:
+            with self.assertRaises(FileNotFoundError):
+                project_file(self.case.root,self.case.ident,self.case.request['request_id'])
+            render.assert_not_called()
+        self.assertFalse(list(self.output.parent.glob('edit.interrupted-*')))
+
+    def test_concurrent_edit_is_rejected_before_modification(self):
+        import fcntl
+        lockpath=self.output.with_name(self.output.name+'.build.lock')
+        with lockpath.open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ProductionError,'already active'):self.build()
+        self.assertFalse(self.output.exists())
