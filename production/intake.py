@@ -49,6 +49,25 @@ class Intake:
             raise ProductionError('Unknown preparation job')
         return {'status': row[0]}
 
+    def retry_preparation(self, ident, request_id):
+        ident, request_id = str(UUID(ident)), str(UUID(request_id))
+        with self.connect() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS preparation_retries
+                (request_id TEXT PRIMARY KEY, order_id TEXT NOT NULL)""")
+            db.execute('BEGIN IMMEDIATE')
+            previous = db.execute('SELECT order_id FROM preparation_retries WHERE request_id=?',
+                                  (request_id,)).fetchone()
+            if previous:
+                if previous[0] != ident:
+                    raise ProductionError('Retry ID belongs to a different order')
+                return {'accepted': True}
+            row = db.execute('SELECT status FROM preparation_jobs WHERE order_id=?', (ident,)).fetchone()
+            if not row or row[0] in {'queued', 'running', 'cancelling'}:
+                raise ProductionError('Order is missing or preparation is already active')
+            db.execute('INSERT INTO preparation_retries VALUES (?,?)', (request_id, ident))
+            db.execute("UPDATE preparation_jobs SET status='queued', attempts=0 WHERE order_id=?", (ident,))
+        return {'accepted': True}
+
     @contextmanager
     def connect(self):
         connection=sqlite3.connect(self.root / 'intake.sqlite3', timeout=10)
@@ -58,7 +77,7 @@ class Intake:
         finally:
             connection.close()
 
-    def asset(self, ident):
+    def asset(self, ident, runtime=None):
         if not isinstance(ident, str):
             raise ProductionError('Invalid asset identifier')
         with self.connect() as db:
@@ -66,7 +85,7 @@ class Intake:
         if not row:
             raise ProductionError('Unknown attachment')
         data = json.loads(row[0])
-        if digest(self.root / 'assets' / ident) != ident:
+        if digest(self.root / 'assets' / ident, runtime) != ident:
             raise ProductionError('Attachment changed after upload')
         return data
 
@@ -221,16 +240,55 @@ def server(root, port, **preparation_options):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
 
-        def response(self, code, value, html=False):
-            payload=value.encode() if html else json.dumps(value,ensure_ascii=False).encode()
+        def response(self, code, value, html=False, content_type=None):
+            payload = value if isinstance(value, bytes) else (
+                value.encode() if html else json.dumps(value,ensure_ascii=False).encode())
             self.send_response(code)
-            self.send_header('Content-Type','text/html; charset=utf-8' if html else 'application/json; charset=utf-8')
+            self.send_header('Content-Type',content_type or ('text/html; charset=utf-8' if html else 'application/json; charset=utf-8'))
             self.send_header('Content-Length',str(len(payload)))
             self.send_header('Cache-Control','no-store')
             self.send_header('X-Content-Type-Options','nosniff')
-            self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'nonce-"+token+"'; style-src 'unsafe-inline'; connect-src 'self'; media-src blob:; frame-ancestors 'none'")
+            self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'nonce-"+token+"'; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(payload)
+
+        def file_response(self, path, content_type):
+            import re
+            size = path.stat().st_size
+            start, end, code = 0, size - 1, 200
+            requested = self.headers.get('Range')
+            if requested:
+                match = re.fullmatch(r'bytes=(\d*)-(\d*)', requested)
+                if not match or not any(match.groups()):
+                    return self.response(416, {'error': 'Invalid range'})
+                first, last = match.groups()
+                if first:
+                    start = int(first)
+                    end = min(int(last), end) if last else end
+                else:
+                    start = max(0, size - int(last))
+                if not 0 <= start <= end < size:
+                    return self.response(416, {'error': 'Invalid range'})
+                code = 206
+            self.connection.settimeout(15)
+            self.send_response(code)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(end - start + 1))
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            if code == 206:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            self.end_headers()
+            with path.open('rb') as stream:
+                stream.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    data = stream.read(min(65536, remaining))
+                    if not data:
+                        break
+                    self.wfile.write(data)
+                    remaining -= len(data)
 
         def allowed(self, mutation=False):
             hosts={f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
@@ -242,12 +300,35 @@ def server(root, port, **preparation_options):
         def do_GET(self):
             if not self.allowed():
                 return self.response(403,{'error':'Local owner access only'})
-            if self.path=='/':
-                page=Path(__file__).with_name('intake.html').read_text().replace('__SESSION_TOKEN__',token)
-                return self.response(200,page,True)
-            if self.path=='/api/orders':
-                return self.response(200,intake.orders())
-            self.response(404,{'error':'Not found'})
+            try:
+                if self.path == '/':
+                    page=Path(__file__).with_name('intake.html').read_text().replace('__SESSION_TOKEN__',token)
+                    return self.response(200,page,True)
+                if self.path == '/api/health':
+                    return self.response(200, {'preparation_running': self.server.controller.thread.is_alive(),
+                        'error': self.server.controller.failure})
+                if self.path == '/api/orders':
+                    return self.response(200,intake.orders())
+                from .planning import order_evidence, latest_plan, media_file, review_page, source_file
+                parts = urlparse(self.path).path.split('/')
+                if len(parts) == 3 and parts[1] == 'review':
+                    return self.response(200, review_page(root, parts[2]), True)
+                if len(parts) >= 5 and parts[:3] == ['', 'api', 'orders']:
+                    ident = str(UUID(parts[3]))
+                    if len(parts) == 5 and parts[4] == 'evidence':
+                        packet = order_evidence(root, ident)
+                        packet['latest_plan'] = latest_plan(root, ident, packet['packet_sha256'])
+                        return self.response(200, packet)
+                    if len(parts) == 6 and parts[4] == 'source':
+                        path, content_type = source_file(root, ident, parts[5])
+                        return self.file_response(path, content_type)
+                    if len(parts) == 6 and parts[4] == 'media':
+                        path, kind = media_file(root, ident, int(parts[5]))
+                        return self.response(200, path.read_bytes(),
+                            content_type='image/jpeg' if kind == 'image' else 'audio/wav')
+                self.response(404,{'error':'Not found'})
+            except (ProductionError, ValueError, OSError, KeyError, TypeError) as exc:
+                self.response(409, {'error': str(exc)})
 
         def do_POST(self):
             if not self.allowed(True):
@@ -260,10 +341,22 @@ def server(root, port, **preparation_options):
                     name=parse_qs(url.query).get('name',[''])[0]
                     return self.response(201,intake.upload(name,self.rfile,size))
                 if url.path=='/api/orders' and 0<size<=65536:
+                    if not self.server.controller.thread.is_alive():
+                        raise ProductionError('Preparation controller is unavailable; restart the local session')
                     order = intake.create(json.loads(self.rfile.read(size)))
                     self.server.controller.ready.set()
                     return self.response(201, order)
                 parts = url.path.split('/')
+                if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'retry' and 0 < size <= 1024:
+                    if not self.server.controller.thread.is_alive():
+                        raise ProductionError('Preparation controller is unavailable; restart the local session')
+                    data = json.loads(self.rfile.read(size))
+                    result = intake.retry_preparation(parts[3], data['request_id'])
+                    self.server.controller.ready.set()
+                    return self.response(200, result)
+                if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'plan' and 0 < size <= 1048576:
+                    from .planning import save_plan
+                    return self.response(201, save_plan(root, parts[3], json.loads(self.rfile.read(size))))
                 if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'cancel' and size == 0:
                     return self.response(200, intake.cancel_preparation(parts[3]))
                 raise ProductionError('Invalid request size or path')

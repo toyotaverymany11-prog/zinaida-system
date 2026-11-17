@@ -5,6 +5,9 @@ The original recording and written order remain unchanged.
 """
 import argparse
 import json
+import fcntl
+import os
+from uuid import uuid4
 from pathlib import Path
 from uuid import UUID
 
@@ -17,7 +20,20 @@ MODEL_SHA = {
 }
 
 
-def transcribe(root, order_id, python, model_path, model='small', timeout=180, runtime=None):
+def transcribe(root, order_id, python, model_path, model='small', timeout=180, runtime=None,
+               expected_sha256=None):
+    ident = str(UUID(order_id))
+    folder = Path(root).resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder / f'transcription-{ident}.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ProductionError('Transcription already running') from exc
+        return _transcribe(root, ident, python, model_path, model, timeout, runtime, expected_sha256)
+
+
+def _transcribe(root, order_id, python, model_path, model, timeout, runtime, expected_sha256):
     ident=str(UUID(order_id))
     intake=Intake(root)
     with intake.connect() as db:
@@ -27,28 +43,41 @@ def transcribe(root, order_id, python, model_path, model='small', timeout=180, r
     order=json.loads(row[0])
     if not order.get('voice'):
         raise ProductionError('Order has no voice recording')
-    asset=intake.asset(order['voice']['id'])
+    runtime = runtime or Runtime(timeout)
+    asset=intake.asset(order['voice']['id'], runtime)
     target=intake.root/'transcripts'/f'{ident}.json'
+    runtime.check()
+    checksum = target.with_suffix('.sha256')
     if target.exists():
-        previous=read_json(target)
-        if previous['source_sha256']!=asset['id'] or previous['model']!=model:
-            raise ProductionError('Existing transcript belongs to different input or model')
-        return previous
-    if model not in MODEL_SHA or not model_path.is_file() or digest(model_path)!=MODEL_SHA[model]:
+        known_hash = expected_sha256
+        if known_hash is None and checksum.is_file():
+            known_hash = checksum.read_text().strip()
+        if known_hash and digest(target, runtime) == known_hash:
+            previous = read_json(target)
+            if (previous.get('source_sha256') == asset['id']
+                    and previous.get('model') == model
+                    and previous.get('order_id') == ident):
+                return previous
+        # Keep the previous derived text for audit, then regenerate from source.
+        archive = target.parent / 'history'
+        archive.mkdir(exist_ok=True)
+        backup = archive / f'{ident}-{uuid4()}.json'
+        os.link(target, backup)
+    if model not in MODEL_SHA or not model_path.is_file() or digest(model_path, runtime)!=MODEL_SHA[model]:
         raise ProductionError('Expected official cached Whisper weights; automatic download is disabled')
-    runtime=runtime or Runtime(timeout)
     source=intake.root/'assets'/asset['id']
     duration=float(probe(source,runtime)['format'].get('duration',0))
     if not 0<duration<=120:
         raise ProductionError('Voice orders are limited to 120 seconds')
     result=json.loads(runtime.run([str(python),str(Path(__file__).with_name('whisper_child.py')),
         '--source',str(source),'--model',str(model_path)]))
-    if digest(source)!=asset['id']:
+    if digest(source,runtime)!=asset['id']:
         raise ProductionError('Recording changed during transcription')
     report={'order_id':ident,'source_sha256':asset['id'],'model':model,
         'model_sha256':MODEL_SHA[model], 'status':'draft_needs_review','provider_calls':0,
         'duration_seconds':duration,**result}
     write_json(target,report)
+    checksum.write_text(digest(target, runtime) + '\n')
     return report
 
 

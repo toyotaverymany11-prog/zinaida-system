@@ -12,6 +12,7 @@ class PreparationController:
         self.intake = intake
         self.options = dict(timeout=number(timeout, 'timeout', 0.1, 3600),
                             python=python, model_path=model_path, model=model)
+        self.failure = None
         self.stop = Event()
         self.ready = Event()
         self.thread = Thread(target=self.run, name='order-preparation')
@@ -50,6 +51,7 @@ class PreparationController:
                 else:
                     self.ready.wait(1)
         except Exception:
+            self.failure = 'Подготовка остановилась из-за ошибки контроллера. Требуется перезапуск локального окна.'
             logging.exception('Order preparation controller failed')
 
     def prepare(self, ident):

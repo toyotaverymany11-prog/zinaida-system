@@ -87,3 +87,14 @@ class ControllerTest(unittest.TestCase):
             finally:
                 controller.close()
         self.assertEqual(worker.call_count, 1)
+
+    def test_explicit_retry_is_durable_and_does_not_rearm_completed_work(self):
+        ident = self.order()
+        self.intake.cancel_preparation(ident)
+        request = str(uuid4())
+        self.intake.retry_preparation(ident, request)
+        controller = self.start()
+        self.wait_state(ident, 'awaiting_review')
+        controller.close()
+        self.intake.retry_preparation(ident, request)
+        self.assertEqual(self.state(ident), ('awaiting_review', 1))

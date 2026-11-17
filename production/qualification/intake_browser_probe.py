@@ -6,6 +6,8 @@ Creates only an owned loopback process, stops it on success or failure.
 import argparse
 import json
 import os
+import re
+from uuid import uuid4
 from pathlib import Path
 import signal
 import subprocess
@@ -67,6 +69,37 @@ def main():
             assert prepared['budget_usd'] == 0 and not prepared['generation_authorized']
             receipt = json.loads((a.output/'data'/'preparations'/prepared['id']/'receipt.json').read_text())
             assert receipt['provider_calls'] == 0 and receipt['semantic_review'] == 'not_performed'
+            packet = json.load(opener.open(url+'/api/orders/'+prepared['id']+'/evidence', timeout=15))
+            token = re.search(r"const token='([^']+)'", opener.open(url, timeout=3).read().decode())[1]
+            plan = {'request_id': str(uuid4()), 'expected_revision': 0,
+                'packet_sha256': packet['packet_sha256'],
+                'plan': {'author': 'synthetic-browser-probe',
+                    'summary': 'Техническая проверка сохранения плана на цветном образце',
+                    'open_questions': ['Нужен настоящий художественный референс'],
+                    'scenes': [{'source': {'asset_id': ref['asset_id'], 'start': 0,
+                        'end': ref['duration_seconds']}, 'observation': 'Технический цветной образец',
+                        'action': 'Проверить путь заказа без генерации',
+                        'preserve': ['Длительность и порядок исходных кадров'],
+                        'change': ['Художественная правка ещё не задана'],
+                        'checks': ['Сверить длительность с исходником']}
+                        for ref in packet['references']]}}
+            request = urllib.request.Request(url+'/api/orders/'+prepared['id']+'/plan',
+                data=json.dumps(plan).encode(), headers={'X-Intake-Token': token})
+            first_plan = json.load(opener.open(request, timeout=15))
+            assert json.load(opener.open(request, timeout=15)) == first_plan
+            assert first_plan['revision'] == 1 and not first_plan['generation_authorized']
+            review = context.new_page()
+            review.on('pageerror',lambda error:errors.append(str(error)))
+            review.goto(url+'/review/'+prepared['id'])
+            expect(review.locator('body')).to_contain_text('Версия 1')
+            expect(review.locator('body')).to_contain_text('Ожидается независимая')
+            review.locator('figure img').first.scroll_into_view_if_needed()
+            review.wait_for_function('() => document.querySelector("figure img").naturalWidth > 0')
+            review.wait_for_function('() => document.querySelector("video").readyState >= 1')
+            review.set_viewport_size({'width':390,'height':844})
+            assert review.evaluate('() => document.documentElement.scrollWidth <= innerWidth')
+            review.screenshot(path=str(a.output/'review-mobile.png'), full_page=True)
+            review.close()
             page.screenshot(path=str(a.output/'desktop.png'),full_page=True)
             page.set_viewport_size({'width':390,'height':844})
             assert page.evaluate('() => document.documentElement.scrollWidth <= innerWidth')
@@ -83,7 +116,7 @@ def main():
             data=json.load(opener.open(url+'/api/orders'))
             assert data[0]['status']=='needs_transcription' and data[0]['voice']['kind']=='audio'
             report={'browser_flow':True,'duplicate_prevented':True,'reload_persists':True,
-                'controller_status':prepared['preparation']['status'], 'mobile_overflow':False,'voice_recorded_and_saved':True,'page_errors':errors,
+                'scene_plan_saved':True, 'evidence_images_loaded':True, 'reference_video_loaded':True, 'controller_status':prepared['preparation']['status'], 'mobile_overflow':False,'voice_recorded_and_saved':True,'page_errors':errors,
                 'provider_calls':0,'production_started':False,'synthetic_media':True}
             (a.output/'report.json').write_text(json.dumps(report,indent=2))
             print(json.dumps(report))

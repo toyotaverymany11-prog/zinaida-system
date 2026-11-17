@@ -19,10 +19,12 @@ class Cancelled(ProductionError):
     pass
 
 
-def digest(path: Path) -> str:
+def digest(path: Path, runtime=None) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            if runtime is not None:
+                runtime.check()
             h.update(chunk)
     return h.hexdigest()
 

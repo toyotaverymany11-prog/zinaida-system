@@ -20,7 +20,7 @@ def inspect_video(source: Path, output: Path, runtime=None, max_samples=24):
     if type(max_samples) is not int or not 2 <= max_samples <= 80:
         raise ProductionError("max_samples must be 2..80")
     source = source.resolve(strict=True)
-    initial_hash = digest(source)
+    initial_hash = digest(source, runtime)
     info = probe(source, runtime)
     video = next((s for s in info["streams"] if s["codec_type"] == "video"), None)
     if not video:
@@ -55,7 +55,7 @@ def inspect_video(source: Path, output: Path, runtime=None, max_samples=24):
                             "-vf", "scale=640:-2", "-q:v", 2, target))
         if not target.exists():
             raise ProductionError(f"Failed to extract frame at {when}")
-        frames.append({"time_seconds": when, "path": f"frames/{target.name}", "sha256": digest(target)})
+        frames.append({"time_seconds": when, "path": f"frames/{target.name}", "sha256": digest(target, runtime)})
     cell_w, cell_h = 320, 210
     sheet = Image.new("RGB", (cell_w*4, cell_h*((len(frames)+3)//4)), "#151923")
     draw = ImageDraw.Draw(sheet)
@@ -71,7 +71,7 @@ def inspect_video(source: Path, output: Path, runtime=None, max_samples=24):
     if audio:
         runtime.run(ffmpeg("-i", source, "-map", "0:a:0", "-vn", "-ac", 1,
                             "-ar", 16000, "-c:a", "pcm_s16le", output/"analysis_audio.wav"))
-    if digest(source) != initial_hash:
+    if digest(source, runtime) != initial_hash:
         raise ProductionError("Source changed during inspection")
     boundaries = [0, *cuts, duration]
     report = {"schema_version": 1, "source_sha256": initial_hash, "probe": info,

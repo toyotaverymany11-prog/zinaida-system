@@ -16,10 +16,10 @@ from .local_transcription import transcribe
 from .media import inspect_video
 
 
-def verified(root, item):
+def verified(root, item, runtime=None):
     try:
         return bool(item.get('files')) and all(
-            digest(local_asset(root,f['path']))==f['sha256'] for f in item['files'])
+            digest(local_asset(root,f['path']), runtime)==f['sha256'] for f in item['files'])
     except (OSError,ProductionError,KeyError,TypeError):
         return False
 
@@ -55,18 +55,18 @@ def prepare_order(root, order_id, *, python=None, model_path=None, model='small'
             # Verify even attachments that do not need video processing.
             for a in [*order['references'],*order['characters'],*([order['voice']] if order.get('voice') else [])]:
                 runtime.check()
-                intake.asset(a['id'])
+                intake.asset(a['id'], runtime)
             cached={e['asset_id']:e for e in previous.get('reference_evidence',[])}
             for a in order['references']:
                 if a['kind']!='video': continue
                 runtime.check()
                 item=cached.get(a['id'])
-                if not item or item.get('max_samples')!=max_samples or not verified(intake.root,item):
+                if not item or item.get('max_samples')!=max_samples or not verified(intake.root,item,runtime):
                     folder=output/receipt['attempt_id']/a['id']
                     report=inspect_video(intake.root/'assets'/a['id'],folder,runtime,max_samples)
                     item={'asset_id':a['id'],'max_samples':max_samples,'analysis_path':str((folder/'analysis.json').relative_to(intake.root)),
                         'source_sha256':report['source_sha256'],'files':[
-                            {'path':str(f.relative_to(intake.root)),'sha256':digest(f)}
+                            {'path':str(f.relative_to(intake.root)),'sha256':digest(f,runtime)}
                             for f in sorted(folder.rglob('*')) if f.is_file()]}
                 receipt['reference_evidence'].append(item)
                 write_json(receipt_path,receipt)
@@ -76,7 +76,8 @@ def prepare_order(root, order_id, *, python=None, model_path=None, model='small'
                     write_json(receipt_path,receipt)
                     return receipt
                 runtime.check()
-                transcript=transcribe(intake.root,ident,python,model_path,model,runtime=runtime)
+                transcript=transcribe(intake.root,ident,python,model_path,model,runtime=runtime,
+                    expected_sha256=previous.get('transcript', {}).get('sha256'))
                 receipt['transcript']={'path':f'transcripts/{ident}.json',
                     'sha256':digest(intake.root/'transcripts'/f'{ident}.json'),
                     'status':transcript['status']}
