@@ -79,6 +79,7 @@ def readiness(order):
             'face_replace': 'face_only_replacement', 'body_replace': 'body_replacement'}[order['mode']]
     candidates = [dict(model, execution_ready=False) for model in MODELS if task in model['tasks']]
     blockers = ['GPU-пилот требует согласованного бюджета.',
+                'До аренды нужен независимо запущенный и проверенный контроль её завершения.',
                 'Нужны измерения качества, времени и стоимости принятого результата.']
     if not candidates:
         blockers.append('Точный маршрут замены только лица ещё требует выбора и испытания.')
