@@ -2,7 +2,7 @@ import json
 import unittest
 from production.core import ProductionError, read_json
 from production.media import release_check
-from production.shot_edit import build
+from production.shot_edit import build, package_preview
 from production.tests import test_shots as fixtures
 
 
@@ -35,3 +35,20 @@ class ShotEdit(unittest.TestCase):
         self.build();p=self.output/'manifest.json';m=read_json(p);m['clips'][0]['purpose']='changed'
         p.write_text(json.dumps(m))
         with self.assertRaisesRegex(ProductionError,'manifest changed'):self.build()
+
+    def test_portable_archive_has_resolvable_relative_media_and_original_bytes(self):
+        import zipfile
+        import opentimelineio as otio
+        from production.core import digest
+        self.build();path=package_preview(self.output)
+        unpack=self.case.root/'unpacked'
+        with zipfile.ZipFile(path) as z:z.extractall(unpack)
+        timeline=otio.adapters.read_from_file(str(unpack/'timeline.otio'))
+        refs=[c.media_reference.target_url for c in timeline.find_clips()]
+        self.assertEqual(refs,['assets/shot.mp4'])
+        self.assertEqual(digest(unpack/refs[0]),digest(self.output/'assets/shot.mp4'))
+        self.assertFalse(read_json(unpack/'checks.json')['finished_video_accepted'])
+
+    def test_changed_render_cannot_be_packaged(self):
+        self.build();(self.output/'render/master.mp4').write_bytes(b'bad')
+        with self.assertRaisesRegex(ProductionError,'changed before packaging'):package_preview(self.output)
