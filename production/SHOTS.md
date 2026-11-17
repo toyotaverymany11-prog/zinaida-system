@@ -54,4 +54,11 @@ reviewer is not an authenticated external client; no public access is enabled.
 Qualification: six new controller tests, 123 passing production tests, and
 Chromium playback/quality/revocation checks on a clearly synthetic clip. The
 separate real H100 pilot proves recipe execution but failed object geometry.
-The new order binding has not yet run a second paid end-to-end GPU attempt.
+The order binding subsequently passed a real H100/AP-IN-1 run: exact prepared order, verified weights, guarded submission, download, full decode, browser playback, confirmed Pod deletion and reuse without another submission. Artistic acceptance remains pending. See qualification/bound-live-20261117.json.
+
+
+## Editable scene preview
+
+`python -m production.shot_edit --root INTAKE --order-id ORDER --request-id SHOT --output NEW_EDIT_FOLDER` copies the verified original, builds a manifest, renders a review copy and writes an editable OpenTimelineIO timeline. The original GPU output is preserved. Reuse checks source, manifest and render hashes. These single-scene previews cannot be released as finished films. The timeline currently references control-host paths; this is an on-server editable project, not yet a portable client bundle.
+
+The operator qualification runner prepares an existing guarded Pod and invokes the bound shot: `python -m production.qualification.bound_pilot_runner --help`. It does not allocate a Pod. The transfer allowance is derived from the original lease with inference and cleanup reserve. The first 64 MiB estimate is conservative, not a throughput guarantee; final full-file SHA checks remain mandatory. Stop the dedicated guard service after confirmed Pod deletion if it is still watching.

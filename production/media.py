@@ -286,7 +286,7 @@ def verify_qr(manifest, master, directory, runtime):
 
 def release_check(manifest, root, output, decisions):
     """Validate evidence supplied by the caller. This does not authenticate a reviewer."""
-    if manifest.get('artifact_kind') == 'source_timing_preview':
+    if manifest.get('artifact_kind') in {'source_timing_preview','generated_scene_preview'}:
         raise ProductionError('Source timing previews cannot be released as finished videos')
     checked = validate(manifest, root)
     report = json.loads((output/"render.json").read_text())
