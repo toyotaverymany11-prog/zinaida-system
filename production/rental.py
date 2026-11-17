@@ -26,17 +26,28 @@ class RunpodControl:
             raise ProductionError('Runpod control credential is not configured')
         self.token=token
         self.opener=urllib.request.build_opener(NoRedirect())
+        self.base_url='https://api.runpod.io/v2'
+        self.simulation=False
 
     def request(self, method, pod_id, runtime):
         if not re.fullmatch(r'[A-Za-z0-9_-]{3,80}',pod_id):
             raise ProductionError('Invalid Runpod resource ID')
         runtime.check()
-        request=urllib.request.Request('https://api.runpod.io/v2/pods/'+pod_id,
+        request=urllib.request.Request(self.base_url+'/pods/'+pod_id,
             method=method,headers={'Authorization':'Bearer '+self.token,'Accept':'application/json'})
         try:
             with self.opener.open(request,timeout=max(.1,min(10,runtime.deadline-time.monotonic()))) as response:
-                raw=response.read(1024*1024+1)
-                if len(raw)>1024*1024:raise ProductionError('Oversized control response')
+                chunks=[];size=0
+                while True:
+                    runtime.check()
+                    # read1 returns after one underlying read, so a trickling peer
+                    # cannot hold read(N) past the operation deadline indefinitely.
+                    chunk=response.read1(min(65536,1024*1024+1-size))
+                    if not chunk:break
+                    chunks.append(chunk);size+=len(chunk)
+                    if size>1024*1024:raise ProductionError('Oversized control response')
+                runtime.check()
+                raw=b''.join(chunks)
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
             if exc.code==404:return None
