@@ -53,6 +53,50 @@ def prepare(workflow, job_id, endpoint):
             "workflow": workflow, "status": "prepared_not_submitted"}
 
 
+def inventory_errors(inputs, fields, workflow, prefix=""):
+    """Understand the legacy and V3 flattened /object_info input inventory.
+
+    This checks names/options, not tensor types, graph execution or model fit.
+    Unknown structured schemas fail closed instead of claiming compatibility.
+    """
+    errors = []
+    for name, field in fields.items():
+        key = prefix + name
+        kind = field[0]
+        options = field[1] if len(field) > 1 and isinstance(field[1], dict) else {}
+        if kind == "COMFY_AUTOGROW_V3":
+            template = options.get("template", {})
+            names = template.get("names")
+            if not isinstance(names, list):
+                errors.append(f"{key}: unsupported autogrow schema")
+                continue
+            present = [n for n in names if key + "." + n in inputs]
+            unknown = [k for k in inputs if k.startswith(key + ".") and k[len(key)+1:] not in names]
+            if len(present) < template.get("min", 0) or unknown:
+                errors.append(f"{key}: missing or unknown dynamic input")
+            continue
+        if key not in inputs:
+            errors.append(f"required input {key} missing")
+            continue
+        value = inputs[key]
+        link = isinstance(value, list) and len(value) == 2 and str(value[0]) in workflow
+        if link:
+            continue
+        choices = kind if isinstance(kind, list) else options.get("options") if kind == "COMBO" else None
+        if choices is not None and value not in choices:
+            errors.append(f"{key} not available (model/option missing)")
+        if kind == "COMFY_DYNAMICCOMBO_V3":
+            choice = next((x for x in options.get("options", []) if x.get("key") == value), None)
+            if choice is None:
+                errors.append(f"{key}: dynamic option not available")
+            else:
+                errors.extend(inventory_errors(inputs, choice.get("inputs", {}).get("required", {}),
+                                               workflow, key + "."))
+        elif isinstance(kind, str) and kind.startswith("COMFY_"):
+            errors.append(f"{key}: unsupported structured input {kind}")
+    return errors
+
+
 class Executor:
     def __init__(self, endpoint, receipt_dir: Path, api_key=None):
         self.endpoint = endpoint_url(endpoint)
@@ -87,15 +131,8 @@ class Executor:
             if not spec:
                 errors.append(f"{key}: missing node {node['class_type']}")
                 continue
-            for name, field in spec.get("input", {}).get("required", {}).items():
-                value = node["inputs"].get(name)
-                if name not in node["inputs"]:
-                    errors.append(f"{key}: required input {name} missing")
-                elif isinstance(field, list) and field and isinstance(field[0], list):
-                    # ComfyUI links are [node id, output index]; don't treat them as literals.
-                    link = isinstance(value, list) and len(value) == 2 and str(value[0]) in plan["workflow"]
-                    if not link and value not in field[0]:
-                        errors.append(f"{key}: {name} not available (model/option missing)")
+            errors.extend(f"{key}: {error}" for error in inventory_errors(
+                node["inputs"], spec.get("input", {}).get("required", {}), plan["workflow"]))
         return {"status": "blocked" if errors else "preflight_pass", "errors": errors,
                 "workflow_sha256": plan["workflow_sha256"],
                 "note": "Node/input inventory only. Does not prove VRAM fit, quality or commercial eligibility."}
