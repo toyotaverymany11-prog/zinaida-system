@@ -129,7 +129,7 @@ def export_otio(manifest, paths, target):
 
 def render(manifest, root: Path, output: Path, runtime=None):
     runtime = runtime or Runtime(1800)
-    checked = validate(manifest, root)
+    checked = validate(manifest, root, runtime)
     paths = checked["paths"]
     fmt = manifest["format"]
     fps, width, height = fmt["fps"], fmt["width"], fmt["height"]
@@ -244,10 +244,10 @@ def render(manifest, root: Path, output: Path, runtime=None):
         checks["qr_payloads"] = all(q["matches"] for q in qr_checks)
         if not checks["qr_payloads"]:
             raise ProductionError("QR payload could not be read from the final MP4")
-        validate(manifest, root)  # Detect input changes during rendering.
+        validate(manifest, root, runtime)  # Detect input changes during rendering.
         export_otio(manifest, paths, output/"timeline.otio")
         report = {"schema_version": 1, "project_id": manifest["project_id"], "revision": manifest["revision"],
-                  "manifest_sha256": checked["manifest_sha256"], "output_sha256": digest(master),
+                  "manifest_sha256": checked["manifest_sha256"], "output_sha256": digest(master, runtime),
                   "output": "master.mp4", "technical_checks": checks, "status": "needs_review",
                   "required_reviews": required_reviews(manifest), "probe": info, "qr_checks": qr_checks,
                   "limitations": ["This is a deterministic cuts/audio/PNG renderer, not a professional finishing suite.",
@@ -286,6 +286,8 @@ def verify_qr(manifest, master, directory, runtime):
 
 def release_check(manifest, root, output, decisions):
     """Validate evidence supplied by the caller. This does not authenticate a reviewer."""
+    if manifest.get('artifact_kind') == 'source_timing_preview':
+        raise ProductionError('Source timing previews cannot be released as finished videos')
     checked = validate(manifest, root)
     report = json.loads((output/"render.json").read_text())
     sha = digest(output/"master.mp4")

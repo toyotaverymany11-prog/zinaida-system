@@ -39,10 +39,13 @@ class Intake:
             db.execute('BEGIN IMMEDIATE')
             columns = {row[1] for row in db.execute('PRAGMA table_info(preparation_jobs)')}
             for name, spec in {'analysis_status': "TEXT NOT NULL DEFAULT 'not_requested'",
-                               'analysis_request_id': 'TEXT', 'analysis_error': 'TEXT'}.items():
+                               'analysis_request_id': 'TEXT', 'analysis_error': 'TEXT',
+                               'preview_status': "TEXT NOT NULL DEFAULT 'not_requested'",
+                               'preview_request_id':'TEXT','preview_error':'TEXT'}.items():
                 if name not in columns:
                     db.execute(f'ALTER TABLE preparation_jobs ADD COLUMN {name} {spec}')
             db.execute('CREATE TABLE IF NOT EXISTS analysis_requests (request_id TEXT PRIMARY KEY, order_id TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS preview_requests (request_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, request_sha256 TEXT NOT NULL, data TEXT NOT NULL)')
 
     def request_analysis(self, ident, request_id):
         ident, request_id = str(UUID(ident)), str(UUID(request_id))
@@ -53,8 +56,8 @@ class Intake:
                 if previous[0] != ident:
                     raise ProductionError('Analysis ID belongs to a different order')
                 return {'accepted': True}
-            row = db.execute('SELECT status,analysis_status FROM preparation_jobs WHERE order_id=?', (ident,)).fetchone()
-            if not row or row[0] != 'awaiting_review' or row[1] in {'queued','running','recovering','cancelling'}:
+            row = db.execute('SELECT status,analysis_status,preview_status FROM preparation_jobs WHERE order_id=?', (ident,)).fetchone()
+            if not row or row[0] != 'awaiting_review' or any(v in {'queued','running','recovering','cancelling'} for v in row[1:]):
                 raise ProductionError('Analysis needs prepared materials and no active attempt')
             db.execute('INSERT INTO analysis_requests VALUES (?,?)', (request_id,ident))
             db.execute("UPDATE preparation_jobs SET analysis_status='queued',analysis_request_id=?,analysis_error=NULL WHERE order_id=?",
@@ -96,8 +99,8 @@ class Intake:
                 if previous[0] != ident:
                     raise ProductionError('Retry ID belongs to a different order')
                 return {'accepted': True}
-            row = db.execute('SELECT status,analysis_status FROM preparation_jobs WHERE order_id=?', (ident,)).fetchone()
-            if not row or row[0] in {'queued', 'running', 'cancelling'} or row[1] in {'queued','running','recovering','cancelling'}:
+            row = db.execute('SELECT status,analysis_status,preview_status FROM preparation_jobs WHERE order_id=?', (ident,)).fetchone()
+            if not row or row[0] in {'queued', 'running', 'cancelling'} or any(v in {'queued','running','recovering','cancelling'} for v in row[1:]):
                 raise ProductionError('Order is missing or preparation is already active')
             db.execute('INSERT INTO preparation_retries VALUES (?,?)', (request_id, ident))
             db.execute("UPDATE preparation_jobs SET status='queued', attempts=0 WHERE order_id=?", (ident,))
@@ -355,6 +358,12 @@ def server(root, port, **preparation_options):
                     return self.response(200, review_page(root, parts[2], token), True)
                 if len(parts) >= 5 and parts[:3] == ['', 'api', 'orders']:
                     ident = str(UUID(parts[3]))
+                    if len(parts) == 5 and parts[4] == 'preview':
+                        from .preview import preview_state
+                        return self.response(200,preview_state(root,ident))
+                    if len(parts) == 6 and parts[4] == 'preview':
+                        from .preview import preview_file
+                        return self.file_response(preview_file(root,ident,parts[5]),'video/mp4')
                     if len(parts) == 5 and parts[4] == 'evidence':
                         packet = order_evidence(root, ident)
                         packet['latest_plan'] = latest_plan(root, ident, packet['packet_sha256'])
@@ -387,6 +396,16 @@ def server(root, port, **preparation_options):
                     self.server.controller.ready.set()
                     return self.response(201, order)
                 parts = url.path.split('/')
+                if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'preview' and 0 < size <= 1024:
+                    if not self.server.controller.thread.is_alive():
+                        raise ProductionError('Controller is unavailable')
+                    from .preview import request_preview
+                    result=request_preview(root,parts[3],json.loads(self.rfile.read(size)))
+                    self.server.controller.ready.set()
+                    return self.response(200,result)
+                if len(parts) == 6 and parts[:3] == ['', 'api', 'orders'] and parts[4:] == ['preview','cancel'] and size == 0:
+                    from .preview import cancel_preview
+                    return self.response(200,cancel_preview(root,parts[3]))
                 if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'analyze' and 0 < size <= 1024:
                     if self.server.controller.planner is None or not self.server.controller.thread.is_alive():
                         raise ProductionError('Visual planner is not configured or controller is unavailable')

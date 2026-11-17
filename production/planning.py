@@ -218,10 +218,14 @@ def review_page(root, order_id, token=None):
                 'const fingerprint=JSON.stringify([decision,notes]);if(decisionRequest&&decisionRequest!==fingerprint)payload.request_id=crypto.randomUUID();'
                 'reviewConfig.request_id=payload.request_id;decisionRequest=fingerprint;'
                 'try{const response=await fetch("/api/orders/"+reviewConfig.order_id+"/plan-review",{method:"POST",headers:{"X-Intake-Token":reviewConfig.token},body:JSON.stringify(payload)});'
-                'const result=await response.json();if(!response.ok)throw Error(result.error);feedback.textContent="Решение сохранено. Генерация не запущена.";}'
+                'const result=await response.json();if(!response.ok)throw Error(result.error);feedback.textContent="Решение сохранено. Генерация не запущена.";'
+                'if(typeof previewConfig!=="undefined"){previewConfig.accepted=decision==="accept_plan";showPreview();}}'
                 'catch(error){feedback.textContent=error.message}}'
                 'document.getElementById("accept-plan").onclick=()=>decide("accept_plan");'
                 'document.getElementById("change-plan").onclick=()=>decide("request_changes");</script>')
+    if proposal and token and proposal['status'] != 'stale_evidence':
+        from .preview import preview_controls
+        parts.append(preview_controls(order['id'],proposal,token))
     parts.append('</html>')
     return ''.join(parts)
 

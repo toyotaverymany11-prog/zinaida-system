@@ -10,7 +10,7 @@ ROUTES = {"existing", "code", "cinematic", "character_series", "video_recast"}
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 
 
-def validate(manifest: dict, root: Path) -> dict:
+def validate(manifest: dict, root: Path, runtime=None) -> dict:
     if manifest.get("schema_version") != 1:
         raise ProductionError("Unsupported manifest schema_version")
     if manifest.get('quality_profile', 'photorealistic') not in {'photorealistic', 'stylized', 'source_matched'}:
@@ -35,7 +35,7 @@ def validate(manifest: dict, root: Path) -> dict:
             raise ProductionError("Invalid asset ID")
         p = local_asset(root, a["path"])
         expected = a.get("sha256", "")
-        if not re.fullmatch("[0-9a-f]{64}", expected) or digest(p) != expected:
+        if not re.fullmatch("[0-9a-f]{64}", expected) or digest(p, runtime) != expected:
             raise ProductionError(f"Asset hash mismatch: {key}")
         paths[key] = p
     characters = manifest.get("characters", {})

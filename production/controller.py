@@ -43,6 +43,8 @@ class PreparationController:
                 db.execute("UPDATE preparation_jobs SET status='cancelled' WHERE status='cancelling'")
                 db.execute("UPDATE preparation_jobs SET analysis_status='recovering' WHERE analysis_status='running'")
                 db.execute("UPDATE preparation_jobs SET analysis_status='cancelled' WHERE analysis_status='cancelling'")
+                db.execute("UPDATE preparation_jobs SET preview_status='recovering' WHERE preview_status='running'")
+                db.execute("UPDATE preparation_jobs SET preview_status='cancelled' WHERE preview_status='cancelling'")
             while not self.stop.is_set():
                 self.ready.clear()
                 with self.intake.connect() as db:
@@ -52,16 +54,23 @@ class PreparationController:
                     if job:
                         db.execute("""UPDATE preparation_jobs SET status='running', attempts=attempts+1
                             WHERE order_id=?""", job)
-                    analysis = None
+                    analysis = preview = None
                     if not job and self.planner is not None:
                         analysis = db.execute("""SELECT order_id,analysis_request_id,analysis_status FROM preparation_jobs
                             WHERE analysis_status IN ('queued','recovering') ORDER BY rowid LIMIT 1""").fetchone()
                         if analysis:
                             db.execute("UPDATE preparation_jobs SET analysis_status='running' WHERE order_id=?", (analysis[0],))
+                    if not job and not analysis:
+                        preview = db.execute("""SELECT order_id,preview_request_id,preview_status FROM preparation_jobs
+                            WHERE preview_status IN ('queued','recovering') ORDER BY rowid LIMIT 1""").fetchone()
+                        if preview:
+                            db.execute("UPDATE preparation_jobs SET preview_status='running' WHERE order_id=?",(preview[0],))
                 if job:
                     self.prepare(job[0])
                 elif analysis:
                     self.analyze(*analysis)
+                elif preview:
+                    self.preview(*preview)
                 else:
                     self.ready.wait(1)
         except Exception:
@@ -122,4 +131,27 @@ class PreparationController:
         with self.intake.connect() as db:
             db.execute("""UPDATE preparation_jobs SET analysis_status=CASE
                 WHEN analysis_status='cancelling' THEN 'cancelled' ELSE ? END, analysis_error=? WHERE order_id=?""",
+                (status,error,ident))
+
+    def preview(self, ident, request_id, previous_status):
+        from .preview import render_preview, PreviewInterrupted
+        def cancelled():
+            with self.intake.connect() as db:
+                row=db.execute('SELECT preview_status FROM preparation_jobs WHERE order_id=?',(ident,)).fetchone()
+            return self.stop.is_set() or row[0]=='cancelling'
+        error=None
+        try:
+            render_preview(self.intake.root,ident,request_id,timeout=180,
+                           should_cancel=cancelled,recover_only=previous_status=='recovering')
+            status='ready'
+        except PreviewInterrupted:
+            status,error='interrupted','Сборка прервана. Сохранившийся исходник не менялся; доступен явный повтор.'
+        except Cancelled:
+            status,error='timed_out','Сборка остановлена по ограничению времени или остановке окна.'
+        except Exception:
+            status,error='failed','Не удалось собрать текущую версию. Проверь план и материалы; исходники сохранены.'
+            logging.exception('Source preview failed for %s',ident)
+        with self.intake.connect() as db:
+            db.execute("""UPDATE preparation_jobs SET preview_status=CASE
+                WHEN preview_status='cancelling' THEN 'cancelled' ELSE ? END,preview_error=? WHERE order_id=?""",
                 (status,error,ident))
