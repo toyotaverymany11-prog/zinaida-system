@@ -23,6 +23,7 @@ async def main(stage):
     from production.intake import Intake
     from production.pult_export import export_once, read_snapshot
     from video_routes import install
+    from video_binding import prepare
     from playwright.async_api import async_playwright
 
     report = {'tests': [], 'environment': 'isolated synthetic HTTPS app',
@@ -54,6 +55,8 @@ async def main(stage):
                 db.execute('INSERT INTO users(id,username,name,role,active) VALUES(?,?,?,?,1)', (uid,uid,uid,role))
             db.execute('INSERT INTO team_tasks('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
         link = dict(task_id=task_id, task_revision=1, owner_id='owner-probe', order_id=order['id'], order_fingerprint=fp)
+        link = prepare(root/'pult-state/pult.sqlite3', **link)
+        check('explicit_binding_from_real_pult_schema',link['task_id']==task_id)
         source_before = hashlib.sha256((root/'video/intake.sqlite3').read_bytes()).hexdigest()
         cache = root/'projection'; cache.mkdir(mode=0o700)
         published = export_once(root/'video', cache, link)

@@ -2,6 +2,19 @@
 
 Status: isolated integration verified; not installed in the shared service.
 
+Before work read `/opt/zinaida/coordination/README.md` and the shared registry.
+GPU, editable packages and CPU revisions belong to PR2; this branch owns only
+integration modules. Shared service deployment is reserved to the Megamozg
+stream until outstanding operations are reconciled. The registry is cooperative,
+not automatic visibility of private chat transcripts.
+
+`video_binding.prepare` now prepares the explicit task/owner/revision link from
+a read-only pult DB. Only an active owner and a human task assigned to that same
+owner qualify in this stage. It creates no task, writes no DB and never guesses
+the intended task. The separately reviewed order fingerprint remains mandatory;
+the exporter verifies it against the video source. Installation and runtime
+checks are still required; this is not a staff-access grant.
+
 The common pult owns coordination, identity and assignment. The video project
 owns orders, assets, scene plans, attempts and production decisions. GPT/Codex
 and Hermes remain replaceable permitted execution routes. Reading a card never
