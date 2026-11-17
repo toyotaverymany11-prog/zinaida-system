@@ -141,6 +141,10 @@ def review_page(root, order_id, token=None):
             parts.append('<h2>' + title + '</h2><p>' + escape(order[key]) + '</p>')
     if packet['transcript']:
         parts.append('<h2>Черновая расшифровка</h2><p>' + escape(packet['transcript']['text']) + '</p>')
+    for asset in order['references']:
+        if asset['kind'] == 'image':
+            url = f"/api/orders/{order['id']}/source/{asset['id']}"
+            parts.append(f'<h2>Изображение-референс</h2><img style="max-width:640px" src="{url}" alt="Изображение-референс">')
     for asset in order['characters']:
         url = f"/api/orders/{order['id']}/source/{asset['id']}"
         parts.append(f'<h2>Персонаж</h2><img style="max-width:320px" src="{url}" alt="Изображение персонажа">')
@@ -226,9 +230,11 @@ def review_page(root, order_id, token=None):
     if proposal and token and proposal['status'] != 'stale_evidence':
         from .preview import preview_controls
         parts.append(preview_controls(order['id'],proposal,token))
-        if order['mode'] == 'new_video' and not order['references'] and not order['characters']:
+        refs = order['references']
+        image_id = refs[0]['id'] if len(refs) == 1 and refs[0]['kind'] == 'image' else None
+        if order['mode'] == 'new_video' and (not refs or image_id) and not order['characters']:
             from .shots import shot_controls
-            parts.append(shot_controls(order['id'],proposal,token))
+            parts.append(shot_controls(order['id'],proposal,token,image_id))
     parts.append('</html>')
     return ''.join(parts)
 

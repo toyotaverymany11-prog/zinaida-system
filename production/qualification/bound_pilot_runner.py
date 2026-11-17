@@ -15,7 +15,7 @@ import time
 from production.core import Runtime, ProductionError, read_json, write_json, object_digest
 from production.rental import RunpodControl, enforce
 from production.rental_guard import private_token, guard_status
-from production.shots import execute_shot
+from production.shots import execute_shot, image_file, check_current, load_request
 
 
 def transfer_budget(terminate_at_epoch, now):
@@ -37,6 +37,10 @@ def run(root, bundle, intake, request_file, credential, ssh_key):
         p=subprocess.Popen(args,stdout=stream,stderr=stream,stdin=subprocess.DEVNULL,start_new_session=True)
         children.append(p);return p
     try:
+        canonical = load_request(intake, request['order_id'], request['request_id'])
+        if canonical != request:
+            raise ProductionError('Runner request differs from canonical prepared shot')
+        check_current(intake, request['order_id'], request, runtime)
         if not guard_status(root,lease)['ready']:raise ProductionError('Independent guard not ready')
         ready_deadline=time.monotonic()+180
         while time.monotonic()<ready_deadline:
@@ -61,6 +65,15 @@ def run(root, bundle, intake, request_file, credential, ssh_key):
         bootstrap=start(['timeout','650',*ssh,'python3 /workspace/gpu_bootstrap_probe.py --root /workspace --timeout 600'],'bootstrap.log')
         while bootstrap.poll() is None:runtime.check();time.sleep(1)
         if bootstrap.returncode:raise ProductionError('GPU bootstrap failed')
+        if request['recipe'] == 'ltx25-i2v':
+            path = image_file(intake, request['order_id'], request, runtime)
+            name = request['input_image']['filename']
+            command(ssh+['mkdir -p /workspace/comfy/input; cat > /workspace/comfy/input/'+name],
+                    input=path.read_bytes())
+            check = command(ssh+['sha256sum /workspace/comfy/input/'+name], capture_output=True)
+            if check.stdout.decode().split()[0] != request['input_image']['sha256']:
+                raise ProductionError('GPU input image transfer SHA mismatch')
+            write_json(root/'input-image-transfer.json', request['input_image'])
         config=root/'download-locations.private.json'
         command(ssh+['umask 077; cat > /workspace/download-locations.private.json'],input=config.read_bytes())
         config.unlink()

@@ -16,6 +16,7 @@ def main():
     p.add_argument('--root',type=Path,required=True)
     p.add_argument('--order-id',required=True)
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--image-asset-id')
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=False)
     sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
     url=f'http://127.0.0.1:{port}'
@@ -36,6 +37,12 @@ def main():
             page=browser.new_page(viewport={'width':390,'height':844})
             errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
             page.goto(url+'/review/'+a.order_id)
+            if a.image_asset_id:
+                reference=page.locator('img[src$="/source/'+a.image_asset_id+'"]')
+                expect(reference).to_be_visible()
+                reference.evaluate('im=>im.decode()')
+                assert reference.evaluate('im=>im.naturalWidth>0')
+                expect(page.locator('[data-shot-check="first_frame_match"]')).to_be_visible()
             expect(page.locator('#shot-status')).to_contain_text('Нужна проверка качества')
             page.wait_for_function("() => document.getElementById('shot-video').readyState>=2")
             page.locator('#shot-video').evaluate('async v=>{v.muted=true;await v.play()}')
@@ -46,6 +53,7 @@ def main():
             assert not errors,errors
             browser.close()
         result={'status':'passed','playback':playback,'page_errors':errors,
+                'image_reference_visible':bool(a.image_asset_id),
                 'semantic_audio_reviewed':False,'artistic_accepted':False,'finished_video_accepted':False}
         (a.output/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
     finally:

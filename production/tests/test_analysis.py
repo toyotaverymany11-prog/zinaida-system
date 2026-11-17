@@ -53,6 +53,35 @@ class VisualAnalysis(unittest.TestCase):
     def run_analysis(self,**kwargs):
         return analyze_order(self.root,self.ident,self.request,self.planner,**kwargs)
 
+    def test_still_reference_is_visible_and_attached_without_becoming_a_character(self):
+        from PIL import Image
+        from production.analysis import bundle
+        from production.core import Runtime
+        from production.planning import review_page, source_file
+        image = self.root/'reference.png'
+        Image.new('RGB', (320, 180), (10, 80, 190)).save(image)
+        with image.open('rb') as stream:
+            asset = self.intake.upload('reference.png', stream, image.stat().st_size)
+        order = self.intake.create({'request_id':str(uuid4()), 'mode':'new_video',
+            'brief':'Оживить изображение', 'references':[asset['id']]})
+        prepare_order(self.root, order['id'])
+        packet = order_evidence(self.root, order['id'])
+        output = self.root/'bundle'; output.mkdir()
+        prompt, images = bundle(self.root, packet, output, Runtime(30))
+        self.assertEqual(len(images), 1)
+        self.assertIn('"type": "still_reference"', prompt)
+        self.assertNotIn('"type": "character_reference"', prompt)
+        with Image.open(images[0]) as actual:
+            self.assertEqual(actual.size, (320, 180))
+            self.assertLess(sum(abs(a-b) for a,b in zip(actual.getpixel((20,20)), (10,80,190))), 5)
+        self.assertIn('/source/'+asset['id'], review_page(self.root, order['id']))
+        path, mime = source_file(self.root, order['id'], asset['id'])
+        self.assertEqual(path.read_bytes(), image.read_bytes())
+        self.assertEqual(mime, 'image/png')
+        path.write_bytes(b'corrupt')
+        with self.assertRaises(ProductionError):
+            bundle(self.root, packet, output, Runtime(30))
+
     def test_validated_plan_reuses_same_attempt_without_another_model_call(self):
         first=self.run_analysis()
         self.assertEqual(first,self.run_analysis())

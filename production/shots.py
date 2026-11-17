@@ -13,16 +13,16 @@ from uuid import UUID
 from .core import ProductionError, Runtime, digest, local_asset, number, object_digest, read_json, write_json
 from .intake import Intake
 from .preview import approved_packet
-from .recipes import ltx25_plan
+from .recipes import ltx25_plan, ltx25_image_plan
 
 CHECKS = ('prompt_match', 'geometry', 'temporal', 'cinematography', 'audio')
 
 
-def shot_controls(ident, proposal, token):
+def shot_controls(ident, proposal, token, image_asset_id=None):
     from html import escape
     config = json.dumps({'order':str(UUID(ident)), 'token':token,
         'revision':proposal['revision'], 'packet':proposal['packet_sha256'],
-        'scenes':len(proposal['plan']['scenes'])}).replace('<', '\\u003c')
+        'scenes':len(proposal['plan']['scenes']), 'image_asset_id':image_asset_id}).replace('<', '\\u003c')
     return (Path(__file__).with_name('shots.html').read_text()
             .replace('__SHOT_CONFIG__', config).replace('__SHOT_NONCE__', escape(token, quote=True)))
 
@@ -54,21 +54,47 @@ def check_current(root, ident, request, runtime):
     packet, proposal = approved_packet(root, ident, request, runtime)
     if object_digest(proposal['plan']) != request['plan_sha256']:
         raise ProductionError('Scene plan changed')
+    if request.get('recipe') == 'ltx25-i2v':
+        image_file(root, ident, request, runtime)
     return packet, proposal
+
+
+def image_file(root, ident, request, runtime):
+    image = request['input_image']
+    if image['filename'] != image['sha256'] + '.png':
+        raise ProductionError('Input image filename does not match its SHA')
+    path = local_asset(folder(root, ident, request['request_id']), 'input/' + image['filename'])
+    if digest(path, runtime) != image['sha256']:
+        raise ProductionError('Prepared input image changed')
+    return path
+
+
+def recipe_plan(request, endpoint):
+    args = (request['prompt'], request['seed'], 'shot-' + request['request_id'], endpoint)
+    if request['recipe'] == 'ltx25-t2v':
+        return ltx25_plan(*args)
+    if request['recipe'] == 'ltx25-i2v':
+        image = request['input_image']
+        return ltx25_image_plan(*args, image['filename'], image['sha256'])
+    raise ProductionError('Unknown shot recipe')
 
 
 def prepare_shot(root, ident, request):
     ident = str(UUID(ident))
-    if not isinstance(request, dict) or set(request) != {
-            'request_id', 'expected_revision', 'packet_sha256', 'scene_index', 'seed'}:
+    fields = {'request_id', 'expected_revision', 'packet_sha256', 'scene_index', 'seed'}
+    if not isinstance(request, dict) or set(request) not in (fields, fields | {'image_asset_id'}):
         raise ProductionError('Invalid shot preparation request')
     request = dict(request, request_id=str(UUID(request['request_id'])))
     if type(request['scene_index']) is not int or type(request['seed']) is not int:
         raise ProductionError('Scene and seed must be integers')
     packet, proposal = approved_packet(root, ident, request, Runtime(30))
     order = packet['order']
-    if order['mode'] != 'new_video' or order['references'] or order['characters']:
+    image_mode = 'image_asset_id' in request
+    if order['mode'] != 'new_video' or order['characters'] or (order['references'] and not image_mode):
         raise ProductionError('This T2V pilot cannot silently ignore references or character identity')
+    if image_mode and (len(order['references']) != 1 or order['references'][0]['kind'] != 'image'
+                       or order['references'][0]['id'] != request['image_asset_id']):
+        raise ProductionError('I2V requires exactly one matching static reference and no characters')
     scenes = proposal['plan']['scenes']
     if proposal['plan']['open_questions'] or not 0 <= request['scene_index'] < len(scenes):
         raise ProductionError('Resolve open questions and choose an existing scene')
@@ -79,13 +105,36 @@ def prepare_shot(root, ident, request):
                        'Requested changes: ' + '; '.join(scene['change']),
                        'Check: ' + '; '.join(scene['checks'])])
     # Validate the fixed recipe without contacting any endpoint.
-    plan = ltx25_plan(prompt, request['seed'], 'shot-' + request['request_id'], 'http://127.0.0.1:8188')
+    image_data = None
+    image = None
+    if image_mode:
+        import hashlib
+        import io
+        from PIL import Image, ImageOps
+        source = local_asset(root, 'assets/' + request['image_asset_id'])
+        if digest(source) != request['image_asset_id']:
+            raise ProductionError('Reference image changed')
+        with Image.open(source) as original:
+            im = ImageOps.exif_transpose(original).convert('RGB')
+            if im.width * 704 != im.height * 1280:
+                raise ProductionError('This first-frame recipe requires the 1280:704 aspect ratio; no implicit crop')
+            stream = io.BytesIO(); im.save(stream, format='PNG')
+        image_data = stream.getvalue()
+        sha = hashlib.sha256(image_data).hexdigest()
+        image = {'asset_id':request['image_asset_id'], 'sha256':sha, 'filename':sha+'.png',
+                 'width':im.width, 'height':im.height, 'transform':'exif_transpose_rgb_png_no_crop'}
+        plan = ltx25_image_plan(prompt, request['seed'], 'shot-'+request['request_id'],
+                                'http://127.0.0.1:8188', image['filename'], sha)
+    else:
+        plan = ltx25_plan(prompt, request['seed'], 'shot-' + request['request_id'], 'http://127.0.0.1:8188')
     fingerprint = object_digest(request)
     result = dict(request, order_id=ident, request_sha256=fingerprint,
                   plan_sha256=object_digest(proposal['plan']), prompt=prompt,
-                  recipe='ltx25-t2v', workflow_sha256=plan['workflow_sha256'],
+                  recipe='ltx25-i2v' if image_mode else 'ltx25-t2v', workflow_sha256=plan['workflow_sha256'],
                   duration_scope='five_second_technical_shot', generation_authorized=False,
                   finished_video_accepted=False, status='prepared')
+    if image_mode:
+        result.update(input_image=image, required_checks=[*CHECKS, 'first_frame_match'])
     with Intake(Path(root)).connect() as db:
         tables(db)
         db.execute('BEGIN IMMEDIATE')
@@ -94,7 +143,19 @@ def prepare_shot(root, ident, request):
         if previous:
             if previous[:2] != (ident, fingerprint):
                 raise ProductionError('Shot request ID reused for different content')
-            return json.loads(previous[2])
+            existing = json.loads(previous[2])
+            if image_mode:
+                image_file(root, ident, existing, Runtime(30))
+            return existing
+        if image_mode:
+            target = folder(root, ident, request['request_id'])/'input'/image['filename']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                if digest(target) != image['sha256']:
+                    raise ProductionError('Existing input image changed')
+            else:
+                with target.open('xb') as stream:
+                    stream.write(image_data)
         db.execute('INSERT INTO shot_requests VALUES (?,?,?,?)',
                    (request['request_id'], ident, fingerprint, json.dumps(result, ensure_ascii=False)))
     return result
@@ -113,6 +174,7 @@ def shot_state(root, ident, request_id=None):
     request = load_request(root, ident, request_id)
     result = {key: request[key] for key in ('request_id', 'expected_revision', 'packet_sha256', 'scene_index')}
     result.update(status='prepared', finished_video_accepted=False, generation_authorized=False)
+    result['required_checks'] = request.get('required_checks', list(CHECKS))
     path = folder(root, ident, request_id) / 'result.json'
     if path.exists():
         receipt = read_json(path)
@@ -159,7 +221,8 @@ def review_shot(root, ident, request_id, review):
     rid = str(UUID(review['request_id']))
     if review['decision'] not in {'accept_shot','reject_shot'}:
         raise ProductionError('Unknown shot decision')
-    if (not isinstance(review['checks'], dict) or set(review['checks']) != set(CHECKS)
+    request = load_request(root, ident, request_id)
+    if (not isinstance(review['checks'], dict) or set(review['checks']) != set(request.get('required_checks', CHECKS))
             or any(type(v) is not bool for v in review['checks'].values())):
         raise ProductionError('Every quality criterion needs an explicit decision')
     from .planning import require_text
@@ -200,7 +263,7 @@ def execute_shot(root, ident, request_id, grant, lease_path, guard_root, credent
     budget = number(grant.get('budget_usd'), 'shot budget', 0.0001, lease['budget_usd'])
     if seconds * lease['hourly_total_usd'] / 3600 > budget:
         raise ProductionError('Runtime exceeds the granted shot budget')
-    plan = ltx25_plan(request['prompt'], request['seed'], 'shot-' + request['request_id'], grant['endpoint'])
+    plan = recipe_plan(request, grant['endpoint'])
     if plan['workflow_sha256'] != request['workflow_sha256']:
         raise ProductionError('Prepared recipe changed')
     base = folder(root, ident, request_id)
