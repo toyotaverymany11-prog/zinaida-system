@@ -89,11 +89,11 @@ class Runtime:
         if time.monotonic() >= self.deadline:
             raise Cancelled("Worker deadline exceeded")
 
-    def run(self, args: list[str], *, cwd=None, stderr=False) -> str:
+    def run(self, args: list[str], *, cwd=None, stderr=False, env=None) -> str:
         self.check()
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             proc = subprocess.Popen(args, cwd=cwd, stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=err, start_new_session=True)
+                                    stdout=out, stderr=err, start_new_session=True, env=env)
             try:
                 while proc.poll() is None:
                     self.check()

@@ -2,7 +2,7 @@
 import argparse
 from html import escape
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 import json
 
 from .core import ProductionError, Runtime, digest, local_asset, number, object_digest, read_json
@@ -10,10 +10,10 @@ from .intake import Intake
 from .generation import requirements, readiness, validate_character_assignment
 
 
-def order_evidence(root, order_id):
+def order_evidence(root, order_id, *, runtime=None):
     intake = Intake(Path(root))
     ident = str(UUID(order_id))
-    runtime = Runtime(30)
+    runtime = runtime or Runtime(30)
     with intake.connect() as db:
         row = db.execute('SELECT data FROM orders WHERE id=?', (ident,)).fetchone()
     if row is None:
@@ -59,6 +59,8 @@ def order_evidence(root, order_id):
             media.append({'path': path, 'sha256': checked[path], 'kind': 'audio'})
         references.append({'asset_id': asset_id,
             'duration_seconds': float(analysis['probe']['format']['duration']),
+            'video_format': [{key: stream[key] for key in ('width','height','avg_frame_rate','color_space','color_transfer','color_primaries') if key in stream}
+                             for stream in analysis['probe']['streams'] if stream.get('codec_type') == 'video'],
             'detected_shots': analysis['detected_shots'], 'frames': frames,
             'audio_index': audio_index, 'coverage': analysis['coverage']})
     if {r['asset_id'] for r in references} != {a['id'] for a in order['references'] if a['kind'] == 'video'}:
@@ -122,7 +124,7 @@ def source_file(root, order_id, asset_id):
     raise ProductionError('Source does not belong to this order')
 
 
-def review_page(root, order_id):
+def review_page(root, order_id, token=None):
     packet = order_evidence(root, order_id)
     order = packet['order']
     proposal = latest_plan(root, order['id'], packet['packet_sha256'])
@@ -174,6 +176,10 @@ def review_page(root, order_id):
         label = ('Материалы изменились. План требует повторной проверки.' if proposal['status'] == 'stale_evidence'
                  else 'Ожидается независимая смысловая и художественная проверка.')
         parts.append(f"<p>Версия {proposal['revision']}. {label}</p><p>{escape(proposal['plan']['summary'])}</p>")
+        review = proposal.get('local_review')
+        if review:
+            label = 'План отмечен как согласованный в локальном окне.' if review['decision'] == 'accept_plan' else 'Запрошены правки плана.'
+            parts.append('<p>' + label + '</p><p>' + escape(review['notes']) + '</p>')
         if proposal['plan'].get('cast'):
             parts.append('<h3>Закреплённые персонажи</h3>')
             for name, refs in proposal['plan']['cast'].items():
@@ -195,6 +201,27 @@ def review_page(root, order_id):
         if proposal['plan']['open_questions']:
             parts.append('<h3>Открытые вопросы</h3><ul>' + ''.join(
                 '<li>' + escape(v) + '</li>' for v in proposal['plan']['open_questions']) + '</ul>')
+        if token and proposal['status'] != 'stale_evidence':
+            request_id = str(uuid4())
+            parts.append('<section><h2>Решение по плану</h2><p>Решение относится только к этой версии плана. '
+                'Оно не запускает генерацию и не подтверждает качество готового видео.</p>'
+                '<label for="review-notes">Замечания и основания решения</label>'
+                '<textarea id="review-notes" rows="4" style="width:100%;box-sizing:border-box"></textarea>'
+                '<p><button id="accept-plan">План согласован</button> '
+                '<button id="change-plan">Нужны правки</button></p><p id="review-feedback" role="status"></p></section>')
+            config = json.dumps({'token':token, 'order_id':order['id'], 'revision':proposal['revision'],
+                'packet_sha256':packet['packet_sha256'], 'request_id':request_id})
+            parts.append('<script nonce="'+escape(token,quote=True)+'">const reviewConfig='+config+';'
+                'let decisionRequest;async function decide(decision){const notes=document.getElementById("review-notes").value;'
+                'const feedback=document.getElementById("review-feedback");if(!notes.trim()){feedback.textContent="Добавь основания решения или требуемые правки.";return}'
+                'const payload={request_id:reviewConfig.request_id,expected_revision:reviewConfig.revision,packet_sha256:reviewConfig.packet_sha256,decision,notes};'
+                'const fingerprint=JSON.stringify([decision,notes]);if(decisionRequest&&decisionRequest!==fingerprint)payload.request_id=crypto.randomUUID();'
+                'reviewConfig.request_id=payload.request_id;decisionRequest=fingerprint;'
+                'try{const response=await fetch("/api/orders/"+reviewConfig.order_id+"/plan-review",{method:"POST",headers:{"X-Intake-Token":reviewConfig.token},body:JSON.stringify(payload)});'
+                'const result=await response.json();if(!response.ok)throw Error(result.error);feedback.textContent="Решение сохранено. Генерация не запущена.";}'
+                'catch(error){feedback.textContent=error.message}}'
+                'document.getElementById("accept-plan").onclick=()=>decide("accept_plan");'
+                'document.getElementById("change-plan").onclick=()=>decide("request_changes");</script>')
     parts.append('</html>')
     return ''.join(parts)
 
@@ -265,9 +292,46 @@ def connect_plans(db):
         order_id TEXT NOT NULL, revision INTEGER NOT NULL, request_id TEXT UNIQUE NOT NULL,
         request_sha256 TEXT NOT NULL, data TEXT NOT NULL,
         PRIMARY KEY (order_id, revision))""")
+    db.execute('''CREATE TABLE IF NOT EXISTS plan_reviews (
+        request_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, revision INTEGER NOT NULL,
+        request_sha256 TEXT NOT NULL, data TEXT NOT NULL)''')
 
 
-def save_plan(root, order_id, request):
+def save_plan_review(root, order_id, request):
+    if not isinstance(request, dict) or set(request) != {'request_id','expected_revision','packet_sha256','decision','notes'}:
+        raise ProductionError('Invalid plan review request')
+    request_id = str(UUID(request['request_id']))
+    if type(request['expected_revision']) is not int or request['expected_revision'] < 1:
+        raise ProductionError('Invalid plan revision')
+    if request['decision'] not in {'accept_plan','request_changes'}:
+        raise ProductionError('Unknown review decision')
+    require_text(request['notes'], 'review notes')
+    packet = order_evidence(root, order_id)
+    if packet['packet_sha256'] != request['packet_sha256']:
+        raise ProductionError('Evidence changed; reload the plan')
+    ident = packet['order']['id']
+    fingerprint = object_digest(request)
+    with Intake(Path(root)).connect() as db:
+        connect_plans(db)
+        db.execute('BEGIN IMMEDIATE')
+        prior = db.execute('SELECT order_id,request_sha256,data FROM plan_reviews WHERE request_id=?',(request_id,)).fetchone()
+        if prior:
+            if prior[:2] != (ident,fingerprint):
+                raise ProductionError('Review request ID belongs to different content')
+            return json.loads(prior[2])
+        row = db.execute('SELECT revision,data FROM scene_plans WHERE order_id=? ORDER BY revision DESC LIMIT 1',(ident,)).fetchone()
+        if not row or row[0] != request['expected_revision'] or json.loads(row[1])['packet_sha256'] != packet['packet_sha256']:
+            raise ProductionError('Plan revision changed; reload before reviewing')
+        result = {'order_id':ident, 'revision':row[0], 'packet_sha256':packet['packet_sha256'],
+                  'decision':request['decision'], 'notes':request['notes'],
+                  'scope':'local_plan_review_only', 'identity_authenticated':False,
+                  'generation_authorized':False, 'finished_video_accepted':False}
+        db.execute('INSERT INTO plan_reviews VALUES (?,?,?,?,?)',
+                   (request_id,ident,row[0],fingerprint,json.dumps(result,ensure_ascii=False)))
+    return result
+
+
+def save_plan(root, order_id, request, *, runtime=None):
     if not isinstance(request, dict) or set(request) != {
             'request_id', 'expected_revision', 'packet_sha256', 'plan'}:
         raise ProductionError('Invalid plan request')
@@ -275,7 +339,7 @@ def save_plan(root, order_id, request):
     revision = request['expected_revision']
     if type(revision) is not int or revision < 0:
         raise ProductionError('Invalid expected_revision')
-    packet = order_evidence(root, order_id)
+    packet = order_evidence(root, order_id, runtime=runtime)
     if request['packet_sha256'] != packet['packet_sha256']:
         raise ProductionError('Evidence changed; reload it before planning')
     validate_plan(request['plan'], packet)
@@ -312,11 +376,17 @@ def latest_plan(root, order_id, packet_sha256):
         connect_plans(db)
         row = db.execute('SELECT data FROM scene_plans WHERE order_id=? ORDER BY revision DESC LIMIT 1',
                          (order_id,)).fetchone()
+        review = db.execute('SELECT data FROM plan_reviews WHERE order_id=? ORDER BY revision DESC,rowid DESC LIMIT 1',
+                            (order_id,)).fetchone()
     if not row:
         return None
     plan = json.loads(row[0])
     if plan['packet_sha256'] != packet_sha256:
         plan['status'] = 'stale_evidence'
+    elif review:
+        decision = json.loads(review[0])
+        if decision['revision'] == plan['revision'] and decision['packet_sha256'] == packet_sha256:
+            plan['local_review'] = decision
     return plan
 
 

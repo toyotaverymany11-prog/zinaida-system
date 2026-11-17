@@ -10,7 +10,7 @@ from production.core import ProductionError, digest
 from production.demo import make_fixture
 from production.intake import Intake
 from production.local_transcription import transcribe
-from production.planning import latest_plan, order_evidence, review_page, save_plan
+from production.planning import latest_plan, order_evidence, review_page, save_plan, save_plan_review
 from production.preparation import prepare_order
 
 
@@ -74,6 +74,22 @@ class ScenePlanning(unittest.TestCase):
         prepare_order(self.root, self.order['id'], max_samples=2)
         with self.assertRaisesRegex(ProductionError, 'Evidence changed'):
             save_plan(self.root, self.order['id'], self.request)
+
+    def test_local_review_is_revision_bound_and_never_authorizes_generation(self):
+        save_plan(self.root,self.order['id'],self.request)
+        review={'request_id':str(uuid4()),'expected_revision':1,'packet_sha256':self.packet['packet_sha256'],
+                'decision':'accept_plan','notes':'Синтетическая проверка сохранения решения'}
+        saved=save_plan_review(self.root,self.order['id'],review)
+        self.assertEqual(saved,save_plan_review(self.root,self.order['id'],review))
+        self.assertFalse(saved['generation_authorized'])
+        self.assertFalse(saved['finished_video_accepted'])
+        self.assertIn('local_review',latest_plan(self.root,self.order['id'],self.packet['packet_sha256']))
+        newer=copy.deepcopy(self.request);newer.update(request_id=str(uuid4()),expected_revision=1)
+        save_plan(self.root,self.order['id'],newer)
+        self.assertNotIn('local_review',latest_plan(self.root,self.order['id'],self.packet['packet_sha256']))
+        review['request_id']=str(uuid4())
+        with self.assertRaisesRegex(ProductionError,'revision changed'):
+            save_plan_review(self.root,self.order['id'],review)
 
     def test_unknown_source_and_time_and_authorization_are_rejected(self):
         for mutate in (
