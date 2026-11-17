@@ -36,7 +36,7 @@ def main():
                 break
             except OSError: time.sleep(.1)
         else: raise RuntimeError('Intake did not become ready')
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright, expect
         with sync_playwright() as p:
             browser=p.chromium.launch(headless=True,args=[
                 '--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream'])
@@ -53,24 +53,24 @@ def main():
             page.locator('#references').set_input_files(str(a.source/'red.mp4'))
             page.locator('#characters').set_input_files(str(a.source/'qr.png'))
             page.get_by_role('button',name='Сохранить заказ',exact=True).click()
-            page.wait_for_function("document.querySelector('#feedback').textContent.includes('сохранён. Производство пока не запущено.')")
+            expect(page.locator('#feedback')).to_contain_text('сохранён. Производство пока не запущено.')
             page.get_by_role('button',name='Сохранить заказ',exact=True).click()
-            page.wait_for_function("!document.querySelector('#submit').disabled")
+            expect(page.locator('#submit')).to_be_enabled()
             assert page.locator('.receipt').count()==1
             page.reload()
             page.wait_for_selector('.receipt')
             page.screenshot(path=str(a.output/'desktop.png'),full_page=True)
             page.set_viewport_size({'width':390,'height':844})
-            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert page.evaluate('() => document.documentElement.scrollWidth <= innerWidth')
             page.screenshot(path=str(a.output/'mobile.png'),full_page=True)
             page.get_by_label('Создаём новый ролик',exact=True).check()
             page.get_by_role('button',name='Записать голосом',exact=True).click()
-            page.wait_for_function("document.querySelector('#record-state').textContent==='Идёт запись'")
+            expect(page.locator('#record-state')).to_have_text('Идёт запись')
             page.wait_for_timeout(1200)
             page.get_by_role('button',name='Остановить запись',exact=True).click()
-            page.wait_for_function("document.querySelector('#record-state').textContent==='Запись готова'")
+            expect(page.locator('#record-state')).to_have_text('Запись готова')
             page.get_by_role('button',name='Сохранить заказ',exact=True).click()
-            page.wait_for_function("document.querySelectorAll('.receipt').length===2")
+            expect(page.locator('.receipt')).to_have_count(2)
             assert errors==[],errors
             data=json.load(opener.open(url+'/api/orders'))
             assert data[0]['status']=='needs_transcription' and data[0]['voice']['kind']=='audio'
