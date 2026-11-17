@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-17",
+  "environment": "isolated copied Megamozg app; one real-order metadata probe",
+  "unit_tests": {"passed": 21, "local": true, "server": true},
+  "https_browser_assertions": {"passed": 28, "widths": [1024, 390], "source_removed_after_export": true},
+  "real_order_export": {
+    "order_id": "41981498-9965-4fd7-a873-f78f5695c0a8",
+    "task_binding": "synthetic isolated, not a live task",
+    "actual_pult_os_user_read_cache": true,
+    "actual_pult_os_user_read_source_denied": true,
+    "source_database_unchanged": true,
+    "evidence": "/opt/zinaida/staging/video-pult-link-20261117/real-order-export-result.json"
+  },
+  "fixed_findings": ["recorded review does not prove current evidence", "retain single-flight slot after HTTP timeout", "umask077 removed intended metadata group read"],
+  "shared_pult_source_files_unchanged": 22,
+  "external_model_calls": 0,
+  "new_rentals": 0,
+  "public_deployment": false,
+  "employee_access_accepted": false,
+  "finished_video_accepted": false,
+  "background_worker_installed": false,
+  "limits": ["one-shot metadata exporter only", "old snapshot survives failed atomic replacement until expiry", "no protected MP4 or ZIP delivery yet", "existing Intake/test SQLite ResourceWarnings on server Python3.13; no full production suite rerun"],
+  "next_acceptance": "reviewed refresh lifecycle, real-task binding and installation admission, then public path"
+}
