@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-17",
+  "scope": "single pinned LTX-2.5 text-to-video technical pilot",
+  "technical_status": "passed",
+  "artistic_status": "rejected",
+  "accepted_seconds": 0,
+  "generation_authorized": false,
+  "reference_editing_qualified": false,
+  "identity_qualified": false,
+  "commercial_release_qualified": false,
+  "source_commit": "35337a4fde1024ee7d373b05ca8a719aba49a791",
+  "model_revision": "49b093a39c19169a8a81721dcc541e07e945232f",
+  "comfy_commit": "ee34406f56f84f6bc89996b8b77a4bedec98a2b9",
+  "image": "runpod/pytorch@sha256:e745934b44a4071b1d20a181cdff9e92dc4af3d304cbaafbd0d23f8dacbe5300",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.13.0+cu130",
+  "python": "3.12.3",
+  "model_bytes": 39709872236,
+  "models_sha_verified_on_control_host_and_gpu": true,
+  "node_preflight": "passed",
+  "bf16_conv3d": "passed",
+  "dependency_check": "passed",
+  "generation_seconds": 46.805,
+  "output": {
+    "sha256": "674e1a58fe111342d74551e16a867778b9ab35f0d35ba656dba5063708434095",
+    "bytes": 1215791,
+    "width": 1280,
+    "height": 704,
+    "fps": 24,
+    "frames": 121,
+    "duration": 5.041667,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "full_decode": "passed",
+    "chromium_playback_to_end": "passed",
+    "browser_errors": []
+  },
+  "visual_review": {
+    "method": "ten sampled frames plus complete decode and browser playback",
+    "positive": [
+      "warm window lighting",
+      "smooth forward camera movement visible in samples",
+      "stable central red ceramic object in sampled frames"
+    ],
+    "rejection": "Requested one spout and one handle; sampled video shows two spout-like protrusions and no clear handle.",
+    "limits": [
+      "No human artistic approval",
+      "No human identity test",
+      "Native audio not an approved Fish voice",
+      "Sampled frames do not prove every temporal detail"
+    ]
+  },
+  "rental": {
+    "gpu_seconds": 1008.7810866832733,
+    "gpu_hourly_usd": 4.39,
+    "gpu_compute_estimate_usd": 1.230152491816547,
+    "conservative_hourly_total_usd": 5,
+    "conservative_gpu_rental_estimate_usd": 1.4010848426156575,
+    "billing_confirmed": false,
+    "billing_records_returned": 0,
+    "billing_may_lag": true,
+    "cpu_probe_id": "14cygnbsrjld3l",
+    "gpu_pod_id": "6nb1mvejzw4qmw",
+    "cpu_deadline_cleanup_verified": true,
+    "gpu_signal_cleanup_verified": true,
+    "both_absent_404": true,
+    "active_rentals": 0
+  },
+  "cost_per_accepted_second": null,
+  "operational_lessons": [
+    "Catalog LOW does not reserve hardware; three different GPU allocation attempts failed before H100 succeeded.",
+    "Do not exclude every directory named models when packaging ComfyUI; comfy/ldm/models is source code.",
+    "Use a venv overlay on the pinned disposable image to preserve CUDA without mutating managed system Python.",
+    "Direct SSH model transfer was too slow; scoped short-lived per-file CDN URLs with exact hashes completed without exporting a Hub account credential.",
+    "The server command channel truncates at 16000 characters; bounded chunks with end-to-end hash work for this small output but a dedicated protected media transfer is needed for large outputs."
+  ],
+  "evidence_directory": "/opt/zinaida/staging/video-production-worker-20261117/gpu-pilot-20261117"
+}

@@ -23,8 +23,10 @@ MODELS = [
      'revision': '49b093a39c19169a8a81721dcc541e07e945232f',
      'tasks': ['cinematic_generation', 'reference_generation', 'character_generation'],
      'runtime': 'comfyui', 'weights_variant': 'comfy_int8',
-     'state': 'upstream_metadata_verified',
-     'limitations': ['VRAM, latency, face fidelity and accepted cost need measurement',
+     'state': 't2v_smoke_verified_artistic_rejected',
+     'technical_evidence': 'production/qualification/gpu-pilot-20261117.json',
+     'limitations': ['One 5-second T2V pilot ran on H100 80GB; object geometry failed visual review',
+                     'Reference editing, face fidelity and accepted cost remain unqualified',
                      'Comfy int8 files cannot be loaded by the PyTorch pipeline']},
     {'id': 'wan-animate-2', 'repo': 'Wan-AI/Wan2.2-Animate-2-14B',
      'revision': '6e8f1973bf0abc2aafd517992e8b6d88c3c46e69',
@@ -78,7 +80,7 @@ def readiness(order):
     task = {'new_video': 'cinematic_generation', 'reference': 'reference_generation',
             'face_replace': 'face_only_replacement', 'body_replace': 'body_replacement'}[order['mode']]
     candidates = [dict(model, execution_ready=False) for model in MODELS if task in model['tasks']]
-    blockers = ['GPU-пилот требует согласованного бюджета.',
+    blockers = ['Конкретному запуску нужны ограниченный бюджет и действующее разрешение.',
                 'До аренды нужен независимо запущенный и проверенный контроль её завершения.',
                 'Нужны измерения качества, времени и стоимости принятого результата.']
     if not candidates:
