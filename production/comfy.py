@@ -115,6 +115,8 @@ class Executor:
         runtime = number(grant.get("max_runtime_seconds"), "max_runtime_seconds", 1, 86400)
         hourly = number(grant.get("gpu_hourly_usd"), "gpu_hourly_usd", 0)
         budget = number(grant.get("budget_usd"), "budget_usd", 0)
+        if budget == 0:
+            raise ProductionError("Generation is forbidden with zero budget")
         if runtime*hourly/3600 > budget:
             raise ProductionError("Declared runtime cost exceeds authorized budget")
         # Pricing and grants must come from the trusted controller. This is not

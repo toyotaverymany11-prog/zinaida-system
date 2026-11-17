@@ -7,6 +7,7 @@ import json
 
 from .core import ProductionError, Runtime, digest, local_asset, number, object_digest, read_json
 from .intake import Intake
+from .generation import requirements, readiness, validate_character_assignment
 
 
 def order_evidence(root, order_id):
@@ -72,6 +73,7 @@ def order_evidence(root, order_id):
     packet = {'schema_version': 1, 'order': order, 'references': references,
               'transcript': transcript, 'media': media,
               'semantic_review': 'pending', 'artistic_review': 'pending'}
+    packet['production_requirements'] = requirements(order)
     packet['packet_sha256'] = object_digest(packet)
     return packet
 
@@ -156,6 +158,15 @@ def review_page(root, order_id):
             url = f"/api/orders/{order['id']}/media/{ref['audio_index']}"
             parts.append(f'<h3>Звук референса</h3><audio controls src="{url}"></audio>')
         parts.append('</section>')
+    contract = packet['production_requirements']
+    parts.append('<h2>Требования к качеству</h2><ul>' + ''.join(
+        '<li>' + escape(text) + '</li>' for text in contract['criteria'].values()) + '</ul>')
+    route = readiness(order)
+    parts.append('<h2>Подготовка генерации</h2><p>Основной маршрут: модели на арендованных GPU.</p>')
+    if route['candidates']:
+        parts.append('<p>Кандидаты для испытания: ' + escape(', '.join(
+            model['id'] for model in route['candidates'])) + '.</p>')
+    parts.append('<ul>' + ''.join('<li>' + escape(text) + '</li>' for text in route['blockers']) + '</ul>')
     parts.append('<h2>План сцен</h2>')
     if proposal is None:
         parts.append('<p>Ожидается разбор задачи и предложение плана сцен.</p>')
@@ -163,6 +174,15 @@ def review_page(root, order_id):
         label = ('Материалы изменились. План требует повторной проверки.' if proposal['status'] == 'stale_evidence'
                  else 'Ожидается независимая смысловая и художественная проверка.')
         parts.append(f"<p>Версия {proposal['revision']}. {label}</p><p>{escape(proposal['plan']['summary'])}</p>")
+        if proposal['plan'].get('cast'):
+            parts.append('<h3>Закреплённые персонажи</h3>')
+            for name, refs in proposal['plan']['cast'].items():
+                parts.append('<p>' + escape(name) + '</p>')
+                for asset_id in refs:
+                    url = f"/api/orders/{order['id']}/source/{asset_id}"
+                    parts.append(f'<img style="max-width:220px" src="{url}" alt="{escape(name, quote=True)}">')
+        elif order['characters']:
+            parts.append('<p>Изображения ещё нужно явно закрепить за персонажами.</p>')
         for i, scene in enumerate(proposal['plan']['scenes'], 1):
             parts.append(f'<section><h3>Сцена {i}</h3>')
             if scene['source']:
@@ -193,8 +213,10 @@ def text_list(value, name):
 
 
 def validate_plan(plan, packet):
-    if not isinstance(plan, dict) or set(plan) != {'author', 'summary', 'scenes', 'open_questions'}:
+    required = {'author', 'summary', 'scenes', 'open_questions'}
+    if not isinstance(plan, dict) or not required <= set(plan) or set(plan) - required - {'cast'}:
         raise ProductionError('Plan fields must be author, summary, scenes, open_questions')
+    validate_character_assignment(plan, packet)
     require_text(plan['author'], 'author')
     require_text(plan['summary'], 'summary')
     if not isinstance(plan['open_questions'], list) or len(plan['open_questions']) > 30:
@@ -276,7 +298,9 @@ def save_plan(root, order_id, request):
         result = {'order_id': ident, 'revision': current + 1,
                   'packet_sha256': packet['packet_sha256'], 'plan': request['plan'],
                   'status': 'needs_independent_review', 'generation_authorized': False,
-                  'semantic_review': 'pending', 'artistic_review': 'pending', 'provider_calls': 0}
+                  'semantic_review': 'pending', 'artistic_review': 'pending', 'provider_calls': 0,
+                  'production_requirements': packet['production_requirements'],
+                  'generation_readiness': readiness(packet['order'])}
         db.execute('INSERT INTO scene_plans VALUES (?,?,?,?,?)',
                    (ident, current + 1, request_id, fingerprint, json.dumps(result, ensure_ascii=False)))
     return result

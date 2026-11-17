@@ -1,0 +1,81 @@
+{
+  "checked_on": "2026-11-17",
+  "provider": "runpod",
+  "source": "Runpod list_gpu_types, product POD, cloud SECURE, gpuCount 1",
+  "source_url": "https://www.runpod.io/pricing",
+  "currency": "USD",
+  "unit": "GPU hour",
+  "availability_scope": "SECURE only; community prices do not establish available community capacity",
+  "generation_authorized": false,
+  "measured_video_cost": null,
+  "gpus": [
+    {
+      "id": "NVIDIA A100 80GB PCIe",
+      "memory_gb": 80,
+      "price": {
+        "community": 1.19,
+        "secure": 2.09
+      },
+      "secure_availability": "LOW"
+    },
+    {
+      "id": "NVIDIA A40",
+      "memory_gb": 48,
+      "price": {
+        "community": 0.35,
+        "secure": 0.59
+      },
+      "secure_availability": "NONE"
+    },
+    {
+      "id": "NVIDIA GeForce RTX 5090",
+      "memory_gb": 32,
+      "price": {
+        "community": 0.69,
+        "secure": 1.39
+      },
+      "secure_availability": "LOW"
+    },
+    {
+      "id": "NVIDIA H100 PCIe",
+      "memory_gb": 80,
+      "price": {
+        "community": 1.99,
+        "secure": 2.89
+      },
+      "secure_availability": "NONE"
+    },
+    {
+      "id": "NVIDIA L40",
+      "memory_gb": 48,
+      "price": {
+        "community": 0.69,
+        "secure": 0.82
+      },
+      "secure_availability": "NONE"
+    },
+    {
+      "id": "NVIDIA L40S",
+      "memory_gb": 48,
+      "price": {
+        "community": 0.79,
+        "secure": 1.09
+      },
+      "secure_availability": "NONE"
+    },
+    {
+      "id": "NVIDIA RTX A6000",
+      "memory_gb": 48,
+      "price": {
+        "community": 0.33,
+        "secure": 0.69
+      },
+      "secure_availability": "LOW"
+    }
+  ],
+  "limitations": [
+    "Listed rates exclude storage/transfer and startup/idle",
+    "No model throughput or quality trial has been performed",
+    "Refresh price and availability before any separately authorized rental"
+  ]
+}

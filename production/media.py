@@ -300,7 +300,8 @@ def release_check(manifest, root, output, decisions):
         raise ProductionError("Reviews must be a list")
     for d in decisions:
         if not isinstance(d, dict) or d.get("category") not in {
-                "content", "artistic", "identity", "source_preservation", "qr"}:
+                "content", "artistic", "identity", "source_preservation", "qr",
+                "photorealism", "temporal", "contact_and_occlusion"}:
             raise ProductionError("Unknown review category")
         if (d.get("output_sha256") != sha or d.get("manifest_sha256") != checked["manifest_sha256"]
                 or d.get("revision") != manifest["revision"]):

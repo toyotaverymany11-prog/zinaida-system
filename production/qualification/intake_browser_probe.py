@@ -74,6 +74,7 @@ def main():
             plan = {'request_id': str(uuid4()), 'expected_revision': 0,
                 'packet_sha256': packet['packet_sha256'],
                 'plan': {'author': 'synthetic-browser-probe',
+                    'cast': {'Тестовый герой': [asset['id'] for asset in packet['order']['characters']]},
                     'summary': 'Техническая проверка сохранения плана на цветном образце',
                     'open_questions': ['Нужен настоящий художественный референс'],
                     'scenes': [{'source': {'asset_id': ref['asset_id'], 'start': 0,
@@ -88,11 +89,18 @@ def main():
             first_plan = json.load(opener.open(request, timeout=15))
             assert json.load(opener.open(request, timeout=15)) == first_plan
             assert first_plan['revision'] == 1 and not first_plan['generation_authorized']
+            assert first_plan['generation_readiness']['primary_route'] == 'self_hosted_gpu'
+            assert not first_plan['generation_readiness']['external_api_auto_fallback']
+            assert 'identity' in first_plan['production_requirements']['criteria']
             review = context.new_page()
             review.on('pageerror',lambda error:errors.append(str(error)))
             review.goto(url+'/review/'+prepared['id'])
             expect(review.locator('body')).to_contain_text('Версия 1')
             expect(review.locator('body')).to_contain_text('Ожидается независимая')
+            expect(review.locator('body')).to_contain_text('Основной маршрут: модели на арендованных GPU.')
+            expect(review.locator('body')).to_contain_text('GPU-пилот требует согласованного бюджета.')
+            expect(review.get_by_role('heading', name='Закреплённые персонажи')).to_be_visible()
+            expect(review.get_by_role('img', name='Тестовый герой', exact=True)).to_be_visible()
             review.locator('figure img').first.scroll_into_view_if_needed()
             review.wait_for_function('() => document.querySelector("figure img").naturalWidth > 0')
             review.wait_for_function('() => document.querySelector("video").readyState >= 1')
@@ -116,6 +124,8 @@ def main():
             data=json.load(opener.open(url+'/api/orders'))
             assert data[0]['status']=='needs_transcription' and data[0]['voice']['kind']=='audio'
             report={'browser_flow':True,'duplicate_prevented':True,'reload_persists':True,
+                'self_hosted_policy_visible':True, 'character_assignment_saved':True,
+                'gpu_generation_blocked':True,
                 'scene_plan_saved':True, 'evidence_images_loaded':True, 'reference_video_loaded':True, 'controller_status':prepared['preparation']['status'], 'mobile_overflow':False,'voice_recorded_and_saved':True,'page_errors':errors,
                 'provider_calls':0,'production_started':False,'synthetic_media':True}
             (a.output/'report.json').write_text(json.dumps(report,indent=2))

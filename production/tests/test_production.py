@@ -112,6 +112,22 @@ class ProductionIntegration(unittest.TestCase):
         with self.assertRaisesRegex(ProductionError,"Missing reviews"):
             release_check(self.manifest,self.root,self.output,[])
 
+    def test_cinematic_export_requires_temporal_and_photorealism_evidence(self):
+        m=copy.deepcopy(self.manifest)
+        m['clips'][0]['route']='cinematic'
+        m['quality_profile']='photorealistic'
+        output=self.base/'cinematic-contract'
+        report=render(m,self.root,output,Runtime(90))
+        decisions=[{'category':category,'verdict':'pass','reviewer':'synthetic-test',
+            'evidence':'Contract fixture only, not actual artistic acceptance',
+            'revision':m['revision'],'output_sha256':report['output_sha256'],
+            'manifest_sha256':report['manifest_sha256']}
+            for category in report['required_reviews']]
+        with self.assertRaisesRegex(ProductionError,'Missing reviews: photorealism, temporal'):
+            release_check(m,self.root,output,[d for d in decisions
+                if d['category'] not in {'photorealism','temporal'}])
+        self.assertEqual(release_check(m,self.root,output,decisions)['status'],'evidence_complete')
+
     def test_release_rejects_unknown_pending_and_failed_extra_reviews(self):
         decisions = [{"category":category, "verdict":"pass", "reviewer":"technical-test",
             "evidence":"Synthetic contract fixture, not artistic acceptance",
@@ -243,6 +259,11 @@ class ComfyIntegration(unittest.TestCase):
     def test_no_authorization_no_submission(self):
         with self.assertRaises(ProductionError):self.e.submit(self.plan,self.grant)
         self.assertEqual(self.server.state["posts"],[])
+    def test_zero_budget_never_submits_even_with_a_zero_hourly_quote(self):
+        self.grant.update(budget_usd=0,gpu_hourly_usd=0)
+        with self.assertRaisesRegex(ProductionError,'zero budget'):
+            self.submit()
+        self.assertEqual(self.server.state['posts'],[])
     def test_changed_plan_or_excess_budget_blocks(self):
         self.grant["budget_usd"]=0
         with self.assertRaises(ProductionError):self.submit()

@@ -53,6 +53,9 @@ class ScenePlanning(unittest.TestCase):
         self.assertEqual(save_plan(self.root, self.order['id'], self.request), result)
         self.assertFalse(result['generation_authorized'])
         self.assertEqual(result['semantic_review'], 'pending')
+        self.assertEqual(result['generation_readiness']['primary_route'], 'self_hosted_gpu')
+        self.assertFalse(result['production_requirements']['external_api_auto_fallback'])
+        self.assertIn('photorealism', result['production_requirements']['criteria'])
         conflict = dict(self.request, request_id=str(uuid4()))
         with self.assertRaisesRegex(ProductionError, 'revision changed'):
             save_plan(self.root, self.order['id'], conflict)

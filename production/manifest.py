@@ -13,6 +13,8 @@ ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 def validate(manifest: dict, root: Path) -> dict:
     if manifest.get("schema_version") != 1:
         raise ProductionError("Unsupported manifest schema_version")
+    if manifest.get('quality_profile', 'photorealistic') not in {'photorealistic', 'stylized', 'source_matched'}:
+        raise ProductionError('Unknown quality_profile')
     for key in ("project_id", "revision"):
         if not ID.fullmatch(str(manifest.get(key, ""))):
             raise ProductionError(f"Invalid {key}")
@@ -119,10 +121,15 @@ def validate(manifest: dict, root: Path) -> dict:
 
 def required_reviews(manifest):
     reviews = {"content", "artistic"}
+    if any(c['route'] in {'cinematic', 'character_series', 'video_recast'} for c in manifest['clips']):
+        reviews.add('temporal')
+        if manifest.get('quality_profile', 'photorealistic') == 'photorealistic':
+            reviews.add('photorealism')
     if any(c.get("characters") for c in manifest["clips"]):
         reviews.add("identity")
     if any(c["route"] == "video_recast" for c in manifest["clips"]):
         reviews.add("source_preservation")
+        reviews.add('contact_and_occlusion')
     if any(a.get("role") == "qr" for a in manifest.get("overlays", [])):
         reviews.add("qr")
     return sorted(reviews)
