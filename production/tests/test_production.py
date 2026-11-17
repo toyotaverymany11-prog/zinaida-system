@@ -112,6 +112,21 @@ class ProductionIntegration(unittest.TestCase):
         with self.assertRaisesRegex(ProductionError,"Missing reviews"):
             release_check(self.manifest,self.root,self.output,[])
 
+    def test_release_rejects_unknown_pending_and_failed_extra_reviews(self):
+        decisions = [{"category":category, "verdict":"pass", "reviewer":"technical-test",
+            "evidence":"Synthetic contract fixture, not artistic acceptance",
+            "revision":self.manifest["revision"],
+            "output_sha256":self.report["output_sha256"],
+            "manifest_sha256":self.report["manifest_sha256"]}
+            for category in self.report["required_reviews"]]
+        self.assertEqual(release_check(self.manifest,self.root,self.output,decisions)["status"],
+                         "evidence_complete")
+        for category, verdict in (("unrecognized", "pass"), ("identity", "fail"),
+                                  ("content", "unknown"), ("artistic", "pending")):
+            bad = decisions + [dict(decisions[0],category=category,verdict=verdict)]
+            with self.assertRaises(ProductionError):
+                release_check(self.manifest,self.root,self.output,bad)
+
     def test_review_bound_to_exact_manifest(self):
         changed=copy.deepcopy(self.manifest)
         changed["clips"][0]["purpose"]="changed requirement"

@@ -70,6 +70,24 @@ def validate(manifest: dict, root: Path) -> dict:
         if c["route"] == "video_recast":
             if c.get("original_asset") not in assets or not c.get("characters") or not c.get("target"):
                 raise ProductionError("video_recast needs original, target and character")
+    overlaps = []
+    for i, c in enumerate(clips):
+        transition = c.get("transition_after")
+        if transition is None:
+            overlaps.append(0)
+            continue
+        if not isinstance(transition, dict) or set(transition) != {"type", "duration_frames"}:
+            raise ProductionError("Transition requires only type and duration_frames")
+        count = transition["duration_frames"]
+        if transition["type"] != "dissolve" or type(count) is not int or count <= 0:
+            raise ProductionError("Only a positive-frame dissolve is supported")
+        if i == len(clips)-1 or count >= min(c["duration_frames"], clips[i+1]["duration_frames"]):
+            raise ProductionError("Transition needs two clips with unused frames")
+        overlaps.append(count)
+    for i, c in enumerate(clips):
+        if (overlaps[i-1] if i else 0) + overlaps[i] >= c["duration_frames"]:
+            raise ProductionError("Transitions must not consume or triple-overlap a clip")
+    total -= sum(overlaps)
     if total / fps > 900:
         raise ProductionError("This worker is bounded to 15 minutes per render")
     for key in ("audio", "overlays"):

@@ -99,10 +99,18 @@ def export_otio(manifest, paths, target):
         "limitations": "Overlay placement and gain are metadata; conform in the target editor."}})
     videos = otio.schema.Track(name="Picture", kind=otio.schema.TrackKind.Video)
     source_audio = otio.schema.Track(name="Source audio", kind=otio.schema.TrackKind.Audio)
-    for c in manifest["clips"]:
-        videos.append(clip(c))
-        source_audio.append(clip(c) if c["source_audio"] == "keep" else
-                            otio.schema.Gap(source_range=otio.opentime.TimeRange(rt(0), rt(c["duration_frames"]))))
+    for i, c in enumerate(manifest["clips"]):
+        incoming = manifest["clips"][i-1].get("transition_after", {}).get("duration_frames", 0) if i else 0
+        outgoing = c.get("transition_after", {}).get("duration_frames", 0)
+        adjusted = dict(c, source_in_seconds=c.get("source_in_seconds", 0) + (incoming//2)/fps,
+                        duration_frames=c["duration_frames"] - incoming//2 - (outgoing-outgoing//2))
+        videos.append(clip(adjusted))
+        source_audio.append(clip(adjusted) if c["source_audio"] == "keep" else
+                            otio.schema.Gap(source_range=otio.opentime.TimeRange(rt(0), rt(adjusted["duration_frames"]))))
+        if outgoing:
+            for track in (videos, source_audio):
+                track.append(otio.schema.Transition(transition_type=otio.schema.TransitionTypes.SMPTE_Dissolve,
+                    in_offset=rt(outgoing//2), out_offset=rt(outgoing-outgoing//2)))
     timeline.tracks.extend([videos, source_audio])
     for group, kind in (("audio", otio.schema.TrackKind.Audio), ("overlays", otio.schema.TrackKind.Video)):
         for i, c in enumerate(manifest.get(group, [])):
@@ -162,6 +170,26 @@ def render(manifest, root: Path, output: Path, runtime=None):
             args += ["-i", path]
         filters = ["".join(f"[{i}:v:0][{i}:a:0]" for i in range(len(videos))) +
                    f"concat=n={len(videos)}:v=1:a=1[basev][basea]"]
+        if any(c.get("transition_after") for c in manifest["clips"]):
+            filters = []
+            for i in range(len(videos)):
+                filters += [f"[{i}:v:0]setpts=PTS-STARTPTS,fps={fps},settb=AVTB[tv{i}]",
+                            f"[{i}:a:0]asetpts=PTS-STARTPTS[ta{i}]"]
+            current_v, current_a = "tv0", "ta0"
+            elapsed = manifest["clips"][0]["duration_frames"]
+            for i in range(1, len(videos)):
+                overlap = manifest["clips"][i-1].get("transition_after", {}).get("duration_frames", 0)
+                nv, na = f"jv{i}", f"ja{i}"
+                if overlap:
+                    filters += [f"[{current_v}][tv{i}]xfade=transition=fade:duration={overlap/fps:.9f}:"
+                                f"offset={(elapsed-overlap)/fps:.9f}[{nv}]",
+                                f"[{current_a}][ta{i}]acrossfade=ns={round(overlap*48000/fps)}:c1=tri:c2=tri[{na}]"]
+                else:
+                    filters.append(f"[{current_v}][{current_a}][tv{i}][ta{i}]concat=n=2:v=1:a=1[{nv}][{na}]")
+                elapsed += manifest["clips"][i]["duration_frames"]-overlap
+                filters.append(f"[{nv}]fps={fps},settb=AVTB[cv{i}]")
+                current_v, current_a = f"cv{i}", na
+            filters += [f"[{current_v}]format=yuv420p[basev]", f"[{current_a}]anull[basea]"]
         audio_labels = ["[basea]"]
         next_index = len(videos)
         for i, a in enumerate(manifest.get("audio", [])):
@@ -266,12 +294,17 @@ def release_check(manifest, root, output, decisions):
         raise ProductionError("Technical checks incomplete")
     needed = set(required_reviews(manifest))
     found = set()
+    if not isinstance(decisions, list):
+        raise ProductionError("Reviews must be a list")
     for d in decisions:
+        if not isinstance(d, dict) or d.get("category") not in {
+                "content", "artistic", "identity", "source_preservation", "qr"}:
+            raise ProductionError("Unknown review category")
         if (d.get("output_sha256") != sha or d.get("manifest_sha256") != checked["manifest_sha256"]
                 or d.get("revision") != manifest["revision"]):
             raise ProductionError("Review refers to a different revision or bytes")
-        if d.get("category") in needed and d.get("verdict") != "pass":
-            raise ProductionError("A required review did not pass")
+        if d.get("verdict") != "pass":
+            raise ProductionError("A review did not pass")
         if not d.get("reviewer") or not d.get("evidence"):
             raise ProductionError("Reviewer and evidence are required")
         found.add(d.get("category"))
