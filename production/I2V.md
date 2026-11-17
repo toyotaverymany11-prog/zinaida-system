@@ -7,9 +7,14 @@ It is not video editing, face replacement, body replacement or artistic acceptan
 
 `prepare_shot` accepts the usual exact request fields plus `image_asset_id`.
 The approved `new_video` order must contain exactly that one static reference
-and no character images. Unresolved plan questions and source-video scenes
-remain blocked. The initial pinned recipe requires the 1280:704 aspect ratio;
-it never silently crops a different composition.
+and either no character images or the same image as its sole character asset.
+The character case requires an explicit, matching single-entry approved cast.
+Unresolved plan questions and source-video scenes remain blocked.
+Without a framing request the pinned recipe requires the 1280:704 aspect ratio.
+An explicit `framing` object with `width`, `height`, and `fit: contain` preserves
+the whole source with centered black padding. Dimensions must be multiples of
+64 within 256..1536, with at most 1,048,576 pixels. The UI offers portrait
+768x1344, landscape 1280x704 and square 1024x1024. It never silently crops.
 
 Preparation verifies the uploaded asset digest, applies EXIF orientation,
 converts to RGB PNG without cropping, and records both source and derived SHA.
@@ -29,7 +34,11 @@ Output delivery rechecks the source order and prepared PNG. A quality decision
 must explicitly include `first_frame_match` in addition to the five existing
 criteria. Even an accepted scene does not release a finished film. Reference
 identity preservation needs separate qualification and is not inferred from
-a successful simple-object test.
+a successful simple-object test. Explicit framing adds `framing_match`;
+single-character trials add `identity`, including subsequent revision reviews.
+This permits a bounded single-image animation trial, not cross-scene identity
+qualification, face replacement or body replacement. Portrait execution and
+character fidelity still require a real GPU trial.
 
 ## Evidence
 

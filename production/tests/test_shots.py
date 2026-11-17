@@ -76,16 +76,18 @@ class BoundShot(unittest.TestCase):
         return execute_shot(self.root,self.ident,self.request['request_id'],grant or self.grant,
             self.lease_path,self.root/'guard',self.root/'secret',execute_authorized=True)
 
-    def prepare_image_order(self, size=(640,352)):
+    def prepare_image_order(self, size=(640,352), character=False):
         from PIL import Image
         path=self.root/'first-frame.png';Image.new('RGB',size,'red').save(path)
         with path.open('rb') as stream:asset=self.intake.upload('first-frame.png',stream,path.stat().st_size)
         self.order=self.intake.create({'request_id':str(uuid4()),'mode':'new_video',
-            'brief':'Animate exact first frame','references':[asset['id']]})
+            'brief':'Animate exact first frame','references':[asset['id']],
+            'characters':[asset['id']] if character else []})
         self.ident=self.order['id'];prepare_order(self.root,self.ident)
         self.packet=order_evidence(self.root,self.ident)
         plan=copy.deepcopy(self.plan_request)
         plan.update(request_id=str(uuid4()),packet_sha256=self.packet['packet_sha256'])
+        if character:plan['plan']['cast']={'test_actor':[asset['id']]}
         save_plan(self.root,self.ident,plan)
         self.accept.update(request_id=str(uuid4()),packet_sha256=self.packet['packet_sha256'])
         save_plan_review(self.root,self.ident,self.accept)
@@ -120,6 +122,39 @@ class BoundShot(unittest.TestCase):
         with self.assertRaisesRegex(ProductionError,'matching static'):
             prepare_shot(self.root,self.ident,dict(self.request,image_asset_id='0'*64))
         self.assertEqual(self.calls,[])
+
+    def test_explicit_portrait_framing_preserves_full_reference_and_binds_workflow(self):
+        from PIL import Image
+        from production.shots import image_file, recipe_plan
+        from production.core import Runtime
+        self.prepare_image_order(size=(320,180))
+        self.request['framing']={'width':768,'height':1344,'fit':'contain'}
+        prepared=prepare_shot(self.root,self.ident,self.request)
+        self.assertIn('framing_match',prepared['required_checks'])
+        with Image.open(image_file(self.root,self.ident,prepared,Runtime(30))) as im:
+            self.assertEqual(im.size,(768,1344))
+            self.assertEqual(im.getpixel((384,0)),(0,0,0))
+            self.assertEqual(im.getpixel((384,672)),(255,0,0))
+        self.assertEqual(recipe_plan(prepared,'http://127.0.0.1:8188')['workflow_sha256'],prepared['workflow_sha256'])
+        with self.assertRaises(ProductionError):
+            prepare_shot(self.root,self.ident,dict(self.request,framing={'width':1024,'height':1024,'fit':'contain'}))
+        with self.assertRaisesRegex(ProductionError,'Invalid bounded'):
+            prepare_shot(self.root,self.ident,dict(self.request,request_id=str(uuid4()),framing={'width':1536,'height':1536,'fit':'contain'}))
+
+    def test_single_character_trial_requires_cast_and_identity_review(self):
+        self.prepare_image_order(character=True)
+        prepared=prepare_shot(self.root,self.ident,self.request)
+        self.assertIn('identity',prepared['required_checks'])
+        self.assertIn('not_cross_scene',prepared['identity_scope'])
+        from production.scene_revision import revision_checks
+        self.assertIn('identity',revision_checks(self.root,self.ident,self.request['request_id']))
+        from production.preview import approved_packet
+        from production.core import Runtime
+        packet,proposal=approved_packet(self.root,self.ident,self.request,Runtime(30))
+        proposal=copy.deepcopy(proposal);proposal['plan'].pop('cast')
+        with patch('production.shots.approved_packet',return_value=(packet,proposal)):
+            with self.assertRaisesRegex(ProductionError,'explicit cast'):
+                prepare_shot(self.root,self.ident,dict(self.request,request_id=str(uuid4())))
 
     def test_preparation_is_idempotent_and_never_spends(self):
         self.assertEqual(self.prepared,prepare_shot(self.root,self.ident,self.request))

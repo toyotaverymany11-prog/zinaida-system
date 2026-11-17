@@ -75,14 +75,14 @@ def recipe_plan(request, endpoint):
         return ltx25_plan(*args)
     if request['recipe'] == 'ltx25-i2v':
         image = request['input_image']
-        return ltx25_image_plan(*args, image['filename'], image['sha256'])
+        return ltx25_image_plan(*args, image['filename'], image['sha256'], image.get('frame_size'))
     raise ProductionError('Unknown shot recipe')
 
 
 def prepare_shot(root, ident, request):
     ident = str(UUID(ident))
     fields = {'request_id', 'expected_revision', 'packet_sha256', 'scene_index', 'seed'}
-    if not isinstance(request, dict) or set(request) not in (fields, fields | {'image_asset_id'}):
+    if not isinstance(request, dict) or set(request) not in (fields, fields | {'image_asset_id'}, fields | {'image_asset_id','framing'}):
         raise ProductionError('Invalid shot preparation request')
     request = dict(request, request_id=str(UUID(request['request_id'])))
     if type(request['scene_index']) is not int or type(request['seed']) is not int:
@@ -90,11 +90,17 @@ def prepare_shot(root, ident, request):
     packet, proposal = approved_packet(root, ident, request, Runtime(30))
     order = packet['order']
     image_mode = 'image_asset_id' in request
-    if order['mode'] != 'new_video' or order['characters'] or (order['references'] and not image_mode):
+    character_mode = (image_mode and len(order['characters']) == 1
+                      and order['characters'][0]['id'] == request['image_asset_id'])
+    if order['mode'] != 'new_video' or (order['characters'] and not character_mode) or (order['references'] and not image_mode):
         raise ProductionError('This T2V pilot cannot silently ignore references or character identity')
     if image_mode and (len(order['references']) != 1 or order['references'][0]['kind'] != 'image'
                        or order['references'][0]['id'] != request['image_asset_id']):
-        raise ProductionError('I2V requires exactly one matching static reference and no characters')
+        raise ProductionError('I2V requires exactly one matching static reference')
+    if character_mode:
+        cast = proposal['plan'].get('cast', {})
+        if len(cast) != 1 or list(cast.values()) != [[request['image_asset_id']]]:
+            raise ProductionError('Single-image character trial needs one explicit cast assignment')
     scenes = proposal['plan']['scenes']
     if proposal['plan']['open_questions'] or not 0 <= request['scene_index'] < len(scenes):
         raise ProductionError('Resolve open questions and choose an existing scene')
@@ -116,15 +122,30 @@ def prepare_shot(root, ident, request):
             raise ProductionError('Reference image changed')
         with Image.open(source) as original:
             im = ImageOps.exif_transpose(original).convert('RGB')
-            if im.width * 704 != im.height * 1280:
+            source_size={'width':im.width,'height':im.height}
+            framing=request.get('framing')
+            if framing is not None:
+                if not isinstance(framing,dict) or set(framing)!={'width','height','fit'} or framing['fit']!='contain':
+                    raise ProductionError('Explicit contain framing required')
+                width,height=framing['width'],framing['height']
+                if (any(type(v) is not int or not 256<=v<=1536 or v%64 for v in (width,height))
+                        or width*height>1048576):
+                    raise ProductionError('Invalid bounded framing dimensions')
+                contained=ImageOps.contain(im,(width,height),method=Image.Resampling.LANCZOS)
+                canvas=Image.new('RGB',(width,height),'black')
+                canvas.paste(contained,((width-contained.width)//2,(height-contained.height)//2));im=canvas
+            elif im.width * 704 != im.height * 1280:
                 raise ProductionError('This first-frame recipe requires the 1280:704 aspect ratio; no implicit crop')
             stream = io.BytesIO(); im.save(stream, format='PNG')
         image_data = stream.getvalue()
         sha = hashlib.sha256(image_data).hexdigest()
         image = {'asset_id':request['image_asset_id'], 'sha256':sha, 'filename':sha+'.png',
                  'width':im.width, 'height':im.height, 'transform':'exif_transpose_rgb_png_no_crop'}
+        if framing is not None:
+            image.update(frame_size={'width':im.width,'height':im.height},source_size=source_size,
+                         transform='exif_transpose_rgb_contain_black_padding_no_crop')
         plan = ltx25_image_plan(prompt, request['seed'], 'shot-'+request['request_id'],
-                                'http://127.0.0.1:8188', image['filename'], sha)
+                                'http://127.0.0.1:8188', image['filename'], sha, image.get('frame_size'))
     else:
         plan = ltx25_plan(prompt, request['seed'], 'shot-' + request['request_id'], 'http://127.0.0.1:8188')
     fingerprint = object_digest(request)
@@ -135,6 +156,10 @@ def prepare_shot(root, ident, request):
                   finished_video_accepted=False, status='prepared')
     if image_mode:
         result.update(input_image=image, required_checks=[*CHECKS, 'first_frame_match'])
+        if framing is not None:result['required_checks'].append('framing_match')
+        if character_mode:
+            result['required_checks'].append('identity')
+            result['identity_scope']='single_image_animation_trial_not_cross_scene_qualification'
     with Intake(Path(root)).connect() as db:
         tables(db)
         db.execute('BEGIN IMMEDIATE')

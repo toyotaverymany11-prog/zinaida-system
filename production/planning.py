@@ -232,7 +232,8 @@ def review_page(root, order_id, token=None):
         parts.append(preview_controls(order['id'],proposal,token))
         refs = order['references']
         image_id = refs[0]['id'] if len(refs) == 1 and refs[0]['kind'] == 'image' else None
-        if order['mode'] == 'new_video' and (not refs or image_id) and not order['characters']:
+        single_character = image_id and len(order['characters']) == 1 and order['characters'][0]['id'] == image_id
+        if order['mode'] == 'new_video' and (not refs or image_id) and (not order['characters'] or single_character):
             from .shots import shot_controls
             parts.append(shot_controls(order['id'],proposal,token,image_id))
     parts.append('</html>')

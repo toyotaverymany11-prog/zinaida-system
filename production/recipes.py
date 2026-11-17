@@ -50,7 +50,7 @@ def verify_ltx25_weights(models_root: Path, runtime):
             else "blocked", "models": results, "generation_authorized": False}
 
 
-def ltx25_image_plan(prompt,seed,job_id,endpoint,image_name,image_sha256):
+def ltx25_image_plan(prompt,seed,job_id,endpoint,image_name,image_sha256,frame_size=None):
     """Explicit first-frame image recipe, distinct from video editing/identity."""
     import re
     if not isinstance(prompt,str) or not prompt.strip() or len(prompt)>12000:
@@ -63,6 +63,16 @@ def ltx25_image_plan(prompt,seed,job_id,endpoint,image_name,image_sha256):
     lock=read_json(WORKFLOWS/'ltx25-i2v.lock.json');graph=read_json(WORKFLOWS/'ltx25-i2v.api.json')
     if object_digest(graph)!=lock['workflow_sha256']:raise ProductionError('Pinned image workflow hash mismatch')
     graph['395']['inputs']['image']=image_name
+    if frame_size is not None:
+        if not isinstance(frame_size,dict) or set(frame_size)!={'width','height'}:
+            raise ProductionError('Explicit frame width and height required')
+        width,height=frame_size['width'],frame_size['height']
+        if (any(type(v) is not int or not 256<=v<=1536 or v%64 for v in (width,height))
+                or width*height>1048576):
+            raise ProductionError('Frame must use multiples of 64 within one megapixel')
+        graph['398:372']['inputs']['value']=width
+        graph['398:360']['inputs']['value']=height
+        del graph['403']
     graph['398:376']['inputs']['value']=prompt.strip()
     for key in ('398:338','398:339'):graph[key]['inputs']['noise_seed']=seed
     plan=prepare(graph,job_id,endpoint)

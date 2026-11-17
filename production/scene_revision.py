@@ -14,6 +14,12 @@ from .shots import folder, shot_file
 REVISION_CHECKS = ('edit_match', 'prompt_match', 'geometry', 'temporal', 'cinematography', 'audio')
 
 
+def revision_checks(root, order_id, request_id):
+    from .shots import load_request
+    original=load_request(root,order_id,request_id)
+    return [*REVISION_CHECKS, *(['identity'] if 'identity' in original.get('required_checks',[]) else [])]
+
+
 def review_revision(root, order_id, request_id, revision_id, review):
     """Record an explicit local-owner decision for this exact correction only."""
     from .intake import Intake
@@ -24,7 +30,7 @@ def review_revision(root, order_id, request_id, revision_id, review):
     if review['decision'] not in {'accept_revision','reject_revision'}:
         raise ProductionError('Unknown correction decision')
     checks = review['checks']
-    if not isinstance(checks,dict) or set(checks)!=set(REVISION_CHECKS) or any(type(v) is not bool for v in checks.values()):
+    if not isinstance(checks,dict) or set(checks)!=set(revision_checks(root,order_id,request_id)) or any(type(v) is not bool for v in checks.values()):
         raise ProductionError('Every correction quality criterion needs an explicit decision')
     require_text(review['notes'], 'correction review notes')
     if review['decision']=='accept_revision' and not all(checks.values()):
@@ -160,7 +166,7 @@ def revisions(root,order_id,request_id):
                 _review_table(db)
                 row=db.execute('SELECT data FROM revision_reviews WHERE shot_id=? AND revision_id=? ORDER BY rowid DESC LIMIT 1',
                                (request_id,output.name)).fetchone()
-            item['required_checks']=list(REVISION_CHECKS)
+            item['required_checks']=revision_checks(root,order_id,request_id)
             if row:item['quality_review']=json.loads(row[0])
             result.append(item)
         except (ProductionError,OSError,ValueError,KeyError):continue
