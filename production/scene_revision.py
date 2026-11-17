@@ -11,6 +11,48 @@ from .media import render
 from .shot_edit import package_preview
 from .shots import folder, shot_file
 
+REVISION_CHECKS = ('edit_match', 'prompt_match', 'geometry', 'temporal', 'cinematography', 'audio')
+
+
+def review_revision(root, order_id, request_id, revision_id, review):
+    """Record an explicit local-owner decision for this exact correction only."""
+    from .intake import Intake
+    from .planning import require_text
+    if not isinstance(review, dict) or set(review) != {'request_id','output_sha256','decision','checks','notes'}:
+        raise ProductionError('Invalid correction review')
+    rid = str(uuid.UUID(review['request_id']))
+    if review['decision'] not in {'accept_revision','reject_revision'}:
+        raise ProductionError('Unknown correction decision')
+    checks = review['checks']
+    if not isinstance(checks,dict) or set(checks)!=set(REVISION_CHECKS) or any(type(v) is not bool for v in checks.values()):
+        raise ProductionError('Every correction quality criterion needs an explicit decision')
+    require_text(review['notes'], 'correction review notes')
+    if review['decision']=='accept_revision' and not all(checks.values()):
+        raise ProductionError('A failed correction criterion cannot be accepted')
+    path=revision_file(root,order_id,request_id,revision_id,'video')
+    if digest(path)!=review['output_sha256']:
+        raise ProductionError('Correction decision refers to another output')
+    result=dict(review,order_id=str(uuid.UUID(order_id)),shot_id=str(uuid.UUID(request_id)),
+        revision_id=revision_id,scope='local_revision_quality_only',identity_authenticated=False,
+        finished_video_accepted=False)
+    fingerprint=object_digest(result)
+    with Intake(Path(root)).connect() as db:
+        _review_table(db)
+        db.execute('BEGIN IMMEDIATE')
+        old=db.execute('SELECT fingerprint,data FROM revision_reviews WHERE request_id=?',(rid,)).fetchone()
+        if old:
+            if old[0]!=fingerprint:raise ProductionError('Correction review ID reused for different content')
+            return json.loads(old[1])
+        db.execute('INSERT INTO revision_reviews VALUES (?,?,?,?,?)',
+                   (rid,request_id,revision_id,fingerprint,json.dumps(result,ensure_ascii=False)))
+    return result
+
+
+def _review_table(db):
+    db.execute('''CREATE TABLE IF NOT EXISTS revision_reviews (
+        request_id TEXT PRIMARY KEY, shot_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, data TEXT NOT NULL)''')
+
 
 def revise(root, order_id, request_id, edit, *, timeout=180):
     """Create/reuse one exact trim/audio decision. Never sends a model request."""
@@ -112,7 +154,15 @@ def revisions(root,order_id,request_id):
             revision_file(root,order_id,request_id,output.name,'video')
             revision_file(root,order_id,request_id,output.name,'project')
             receipt=read_json(output/'result.json')
-            result.append({key:receipt[key] for key in ('revision_id','edit','output_sha256','status','finished_video_accepted')})
+            item={key:receipt[key] for key in ('revision_id','edit','output_sha256','status','finished_video_accepted')}
+            from .intake import Intake
+            with Intake(Path(root)).connect() as db:
+                _review_table(db)
+                row=db.execute('SELECT data FROM revision_reviews WHERE shot_id=? AND revision_id=? ORDER BY rowid DESC LIMIT 1',
+                               (request_id,output.name)).fetchone()
+            item['required_checks']=list(REVISION_CHECKS)
+            if row:item['quality_review']=json.loads(row[0])
+            result.append(item)
         except (ProductionError,OSError,ValueError,KeyError):continue
     return result
 

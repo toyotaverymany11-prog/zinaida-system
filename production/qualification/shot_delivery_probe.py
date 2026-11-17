@@ -85,6 +85,16 @@ def main():
             revision_playback=revised.locator('video').evaluate('v=>({duration:v.duration,width:v.videoWidth,height:v.videoHeight,ended:v.ended,error:v.error})')
             assert revision_playback['duration']==3 and revision_playback['ended'] and revision_playback['error'] is None
             revised.close()
+            decision=page.locator('#shot-revision-list details').first
+            decision.locator('summary').click()
+            checks=decision.locator('[data-revision-check]')
+            assert checks.count()==6
+            for index in range(checks.count()):checks.nth(index).check()
+            decision.locator('textarea').fill('Synthetic UI decision on an isolated copy, not artistic acceptance')
+            decision.get_by_role('button',name='Принять эту версию',exact=True).click()
+            expect(page.locator('#shot-revision-list summary').first).to_have_text('Исправленная версия принята отдельно')
+            page.reload()
+            expect(page.locator('#shot-revision-list summary').first).to_have_text('Исправленная версия принята отдельно')
             page.locator('#review-notes').fill('Isolated copied order: test revocation of package delivery')
             page.locator('#change-plan').click()
             expect(page.locator('#review-feedback')).to_contain_text('Решение сохранено')
@@ -97,7 +107,7 @@ def main():
                 assert page.evaluate('async u=>(await fetch(u)).status',uri)==409
             assert not errors,errors
             browser.close()
-        result={'status':'passed','revision_playback':revision_playback,'revision_revoked_delivery_status':409,'download_bytes':downloaded.stat().st_size,'zip_sha256':hashlib.sha256(downloaded.read_bytes()).hexdigest(),'relative_references':refs,'revoked_delivery_status':denied,'original_order_unchanged':True,'playback':playback,'page_errors':errors,
+        result={'status':'passed','revision_review_persisted_on_isolated_copy':True,'revision_playback':revision_playback,'revision_revoked_delivery_status':409,'download_bytes':downloaded.stat().st_size,'zip_sha256':hashlib.sha256(downloaded.read_bytes()).hexdigest(),'relative_references':refs,'revoked_delivery_status':denied,'original_order_unchanged':True,'playback':playback,'page_errors':errors,
                 'semantic_audio_reviewed':False,'artistic_accepted':False,'finished_video_accepted':False}
         (a.output/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
     finally:

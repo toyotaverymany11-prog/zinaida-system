@@ -418,6 +418,9 @@ def server(root, port, **preparation_options):
                 if len(parts) == 7 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'shots' and parts[6] == 'review' and 0 < size <= 16384:
                     from .shots import review_shot
                     return self.response(200,review_shot(root,parts[3],parts[5],json.loads(self.rfile.read(size))))
+                if len(parts) == 9 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'shots' and parts[6] == 'revisions' and parts[8] == 'review' and 0 < size <= 16384:
+                    from .scene_revision import review_revision
+                    return self.response(200,review_revision(root,parts[3],parts[5],parts[7],json.loads(self.rfile.read(size))))
                 if len(parts) == 5 and parts[:3] == ['', 'api', 'orders'] and parts[4] == 'preview' and 0 < size <= 1024:
                     if not self.server.controller.thread.is_alive():
                         raise ProductionError('Controller is unavailable')

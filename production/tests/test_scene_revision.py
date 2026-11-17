@@ -51,6 +51,27 @@ class SceneRevision(unittest.TestCase):
         result=self.run_edit();(Path(result['output'])/'preview-project.zip').write_bytes(b'bad')
         with self.assertRaisesRegex(ProductionError,'Saved correction changed'):self.run_edit()
 
+    def test_revision_review_is_exact_idempotent_and_not_film_acceptance(self):
+        from uuid import uuid4
+        from production.scene_revision import review_revision,revisions,REVISION_CHECKS
+        result=self.run_edit();args=(self.case.root,self.case.ident,self.case.request['request_id'],result['revision_id'])
+        review={'request_id':str(uuid4()),'output_sha256':result['output_sha256'],'decision':'accept_revision',
+                'checks':dict.fromkeys(REVISION_CHECKS,True),'notes':'Synthetic exact correction review'}
+        saved=review_revision(*args,review)
+        self.assertEqual(saved,review_revision(*args,review))
+        self.assertFalse(saved['finished_video_accepted'])
+        self.assertEqual(revisions(*args[:3])[0]['quality_review'],saved)
+        with self.assertRaisesRegex(ProductionError,'reused'):
+            review_revision(*args,dict(review,notes='Different decision'))
+        with self.assertRaisesRegex(ProductionError,'another output'):
+            review_revision(*args,dict(review,request_id=str(uuid4()),output_sha256='0'*64))
+        with self.assertRaisesRegex(ProductionError,'failed correction'):
+            review_revision(*args,dict(review,request_id=str(uuid4()),checks=dict(review['checks'],edit_match=False)))
+        from production.planning import save_plan_review
+        save_plan_review(self.case.root,self.case.ident,dict(self.case.accept,request_id=str(uuid4()),
+            decision='request_changes',notes='Revoked before another review'))
+        with self.assertRaises(ProductionError):review_revision(*args,review)
+
     def test_delivery_is_bound_and_plan_revocation_blocks_it(self):
         from production.scene_revision import revision_file,revisions
         from production.planning import save_plan_review
