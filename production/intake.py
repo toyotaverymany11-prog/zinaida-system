@@ -361,6 +361,13 @@ def server(root, port, **preparation_options):
                     if len(parts) == 5 and parts[4] == 'shots':
                         from .shots import shot_state
                         return self.response(200,shot_state(root,ident))
+                    if len(parts) == 7 and parts[4] == 'shots' and parts[6] == 'revisions':
+                        from .scene_revision import revisions
+                        return self.response(200,revisions(root,ident,parts[5]))
+                    if len(parts) == 9 and parts[4] == 'shots' and parts[6] == 'revisions' and parts[8] in {'video','project'}:
+                        from .scene_revision import revision_file
+                        return self.file_response(revision_file(root,ident,parts[5],parts[7],parts[8]),
+                            'video/mp4' if parts[8]=='video' else 'application/zip')
                     if len(parts) == 7 and parts[4] == 'shots' and parts[6] == 'project':
                         from .shot_edit import project_file
                         return self.file_response(project_file(root,ident,parts[5]),'application/zip')

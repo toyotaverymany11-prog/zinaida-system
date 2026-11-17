@@ -69,6 +69,22 @@ def main():
                         for child in value:visit(child)
                 visit(timeline)
                 assert refs==['assets/shot.mp4','assets/shot.mp4'],refs
+            revision_video=page.locator('[data-revision-kind="video"]').first.get_attribute('href')
+            revision_project=page.locator('[data-revision-kind="project"]').first.get_attribute('href')
+            with page.expect_download() as revised_event:page.locator('[data-revision-kind="project"]').first.click()
+            revision_download=a.output/'browser-revision.zip';revised_event.value.save_as(revision_download)
+            with zipfile.ZipFile(revision_download) as archive:
+                assert archive.testzip() is None
+                manifest=json.loads(archive.read('manifest.json'))
+                assert manifest['clips'][0]['duration_frames']==72
+                assert manifest['clips'][0]['source_in_seconds']==1
+                assert hashlib.sha256(archive.read('assets/shot.mp4')).hexdigest()=='bd7e779a7972a4e040b5115e4933ac4db11b3506bd8e174b5334302fd379180b'
+            revised=browser.new_page();revised.goto(url+revision_video)
+            revised.locator('video').evaluate('async v=>{v.muted=true;await v.play()}')
+            revised.wait_for_function('() => document.querySelector("video").ended')
+            revision_playback=revised.locator('video').evaluate('v=>({duration:v.duration,width:v.videoWidth,height:v.videoHeight,ended:v.ended,error:v.error})')
+            assert revision_playback['duration']==3 and revision_playback['ended'] and revision_playback['error'] is None
+            revised.close()
             page.locator('#review-notes').fill('Isolated copied order: test revocation of package delivery')
             page.locator('#change-plan').click()
             expect(page.locator('#review-feedback')).to_contain_text('Решение сохранено')
@@ -76,9 +92,12 @@ def main():
             expect(page.locator('#shot-project')).to_be_hidden()
             denied=page.evaluate('async u=>(await fetch(u)).status',href)
             assert denied==409,denied
+            expect(page.locator('#shot-revisions')).to_be_hidden()
+            for uri in (revision_video,revision_project):
+                assert page.evaluate('async u=>(await fetch(u)).status',uri)==409
             assert not errors,errors
             browser.close()
-        result={'status':'passed','download_bytes':downloaded.stat().st_size,'zip_sha256':hashlib.sha256(downloaded.read_bytes()).hexdigest(),'relative_references':refs,'revoked_delivery_status':denied,'original_order_unchanged':True,'playback':playback,'page_errors':errors,
+        result={'status':'passed','revision_playback':revision_playback,'revision_revoked_delivery_status':409,'download_bytes':downloaded.stat().st_size,'zip_sha256':hashlib.sha256(downloaded.read_bytes()).hexdigest(),'relative_references':refs,'revoked_delivery_status':denied,'original_order_unchanged':True,'playback':playback,'page_errors':errors,
                 'semantic_audio_reviewed':False,'artistic_accepted':False,'finished_video_accepted':False}
         (a.output/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
     finally:
