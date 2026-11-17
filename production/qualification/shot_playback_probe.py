@@ -38,7 +38,7 @@ def main():
             errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
             page.goto(url+'/review/'+a.order_id)
             if a.image_asset_id:
-                reference=page.locator('img[src$="/source/'+a.image_asset_id+'"]')
+                reference=page.locator('img[alt="Изображение-референс"][src$="/source/'+a.image_asset_id+'"]')
                 expect(reference).to_be_visible()
                 reference.evaluate('im=>im.decode()')
                 assert reference.evaluate('im=>im.naturalWidth>0')
