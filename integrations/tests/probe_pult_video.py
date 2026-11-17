@@ -21,7 +21,7 @@ async def main(stage):
     from aiohttp import ClientSession, TCPConnector, web
     from app import create_app, COOKIE
     from production.intake import Intake
-    from production.pult_link import collect
+    from production.pult_export import export_once, read_snapshot
     from video_routes import install
     from playwright.async_api import async_playwright
 
@@ -54,6 +54,12 @@ async def main(stage):
                 db.execute('INSERT INTO users(id,username,name,role,active) VALUES(?,?,?,?,1)', (uid,uid,uid,role))
             db.execute('INSERT INTO team_tasks('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
         link = dict(task_id=task_id, task_revision=1, owner_id='owner-probe', order_id=order['id'], order_fingerprint=fp)
+        source_before = hashlib.sha256((root/'video/intake.sqlite3').read_bytes()).hexdigest()
+        cache = root/'projection'; cache.mkdir(mode=0o700)
+        published = export_once(root/'video', cache, link)
+        check('bounded_export_observed', published['state']=='observed')
+        (root/'video').rename(root/'source-offline')
+        check('web_source_unavailable', not (root/'video').exists())
         flags = {'mode': 'normal', 'reads': 0}
         def loader(binding):
             flags['reads'] += 1
@@ -64,11 +70,12 @@ async def main(stage):
             if flags['mode'] == 'revoke':
                 with store.db() as db:
                     db.execute("DELETE FROM sessions WHERE user_id='owner-probe'")
-            data = collect(root/'video', binding, now=time.time()-(400 if flags['mode']=='stale' else 0))
+            data = read_snapshot(cache, binding)
+            if flags['mode']=='stale':
+                data['observed_at'] -= 400
             data['private_unexpected'] = 'MUST NOT LEAK'
             return data
         install(app, store, {task_id: link}, loader)
-        source_before = hashlib.sha256((root/'video/intake.sqlite3').read_bytes()).hexdigest()
         cert, key = root/'cert.pem', root/'key.pem'
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
                         '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],
@@ -133,7 +140,7 @@ async def main(stage):
                     check('no_javascript_errors',not errors)
                 finally:
                     await browser.close()
-            check('source_database_unchanged',source_before==hashlib.sha256((root/'video/intake.sqlite3').read_bytes()).hexdigest())
+            check('source_database_unchanged',source_before==hashlib.sha256((root/'source-offline/intake.sqlite3').read_bytes()).hexdigest())
             with store.db() as db:
                 check('no_model_jobs',db.execute('SELECT count(*) FROM tasks').fetchone()[0]==0)
                 check('no_board_execution',db.execute('SELECT attempts FROM team_tasks WHERE id=?',(task_id,)).fetchone()[0]==0)
