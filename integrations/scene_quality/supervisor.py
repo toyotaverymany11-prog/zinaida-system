@@ -16,7 +16,6 @@ import subprocess
 import tempfile
 
 from .contracts import Invalid, correction_tasks, digest, require_text, sha, validate_review
-from .media_probe import inspect
 
 
 def file_sha(path):
@@ -67,6 +66,9 @@ def current(root):
 
 
 def prepare(root, movie, creator_id, ledger, speech=None):
+    # Read-only delivery workers need hashing and state checks, not NumPy,
+    # OpenBLAS threads or decoding. Load the scientific stack only to prepare.
+    from .media_probe import inspect
     require_text(creator_id, 'creator identity')
     movie = Path(movie)
     if not movie.is_file() or movie.stat().st_size > 512 * 1024 * 1024:

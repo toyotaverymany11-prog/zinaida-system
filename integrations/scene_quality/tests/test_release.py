@@ -110,6 +110,11 @@ class ReleaseFixture(unittest.TestCase):
             '--video',str(self.movie),'--project',str(self.project),'--ledger',str(self.ledger_path)],capture_output=True,text=True)
         self.assertEqual(r.returncode,3);self.assertFalse(json.loads(r.stdout)['allowed_as_owner_candidate'])
 
+    def test_read_only_release_import_does_not_start_scientific_runtime(self):
+        script="import sys;from integrations.scene_quality.release import guard;assert not {'numpy','torch','cv2'}.intersection(sys.modules)"
+        r=subprocess.run([sys.executable,'-c',script],capture_output=True,text=True)
+        self.assertEqual(r.returncode,0,r.stderr)
+
     def producer(self):
         adapter=Path(__file__).resolve().parents[2]/'megamozg';sys.path.insert(0,str(adapter));self.addCleanup(lambda:sys.path.remove(str(adapter)))
         import video_scene_producer
