@@ -19,6 +19,25 @@ request before submission and never automatically repeats an unknown outcome.
 The first producer request timed out; the route is not qualified by that attempt.
 No secret is stored in this repository.
 
+`preflight.py` adds conservative cold-start timing before the trial runner can
+allocate a disposable GPU. It includes all pinned weight bytes, measured transfer
+rate, bootstrap, inference, review and cleanup within the original aggregate
+grant. It never renews an expired grant. A current `cold-start-plan.json` is now
+required; a missing or infeasible plan prevents POST.
+
+`supervisor.py` makes an immutable copy of the exact movie, decodes every frame,
+preserves the owner's rejection and builds an internal review job. Its delivery
+guard checks the current SHA again. Trusted runner receipts bind model revision,
+perception capabilities and actual coverage separately from model-written
+findings. Corrections name the source SHA, stage, interval and recheck condition.
+New versions require fresh reviews and have a two-round lineage limit.
+
+The live owner-rejected bouquet film is an integration control, never a new
+delivery. No calibrated audiovisual reviewer is registered by this package.
+The review path therefore remains closed for real films until that reviewer
+is qualified. Simulated passing capabilities occur only in unit-test fixtures.
+This does not yet intercept every legacy writer or the installed pult UI.
+
 Tests: `python -m unittest discover -s integrations/scene_quality/tests -v`.
 They check consequential failures: stale reviews, self-approval, missing actual
 modalities, critical findings hidden by a passing verdict, and replacement of

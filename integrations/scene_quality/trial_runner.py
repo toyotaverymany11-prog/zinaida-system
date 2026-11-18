@@ -19,7 +19,46 @@ import urllib.parse
 from uuid import uuid4
 
 
-def run(root):
+def cold_start_check(root, grant, now):
+    """An allocation cannot bypass full cold-start timing with a cheaper grant."""
+    from integrations.scene_quality.preflight import assess
+    root = Path(root)
+    proposal = json.loads((root/'cold-start-plan.json').read_text())
+    lock = json.loads((root/'source/integrations/scene_quality/workflows/ltx25-i2v.lock.json').read_text())
+    # This runner always downloads all pinned weights onto a disposable disk.
+    # A future cache-aware runner needs its own verified cache receipt.
+    if proposal.get('model_bytes_to_transfer') != lock['total_model_bytes']:
+        raise RuntimeError('Cold-start estimate does not cover all pinned model bytes')
+    proposal.update(grant_deadline_epoch=grant['terminate_at_epoch'],
+                    remaining_budget_usd=grant['budget_usd'], hourly_total_ceiling_usd=5)
+    result = assess(proposal, now)
+    if not result['allocation_authorized']:
+        raise RuntimeError('Cold-start blocked before POST: '+','.join(result['blockers']))
+    return result
+
+
+def recovery_grant(root, attempt, now):
+    """A diagnosed SSH failure permits one replacement within the ORIGINAL grant."""
+    if attempt == 1:
+        return {'terminate_at_epoch': now + 43*60, 'budget_usd': 5}
+    if attempt != 2:
+        raise ValueError('At most one diagnosed replacement')
+    first=Path(root)/'gpu-trial-01'
+    intent=json.loads((first/'allocation.json').read_text())
+    cleanup=json.loads((first/'runner-cleanup.json').read_text())
+    error=json.loads((first/'error.json').read_text())
+    if (cleanup.get('provider_absence_confirmed') is not True or
+        error.get('error_type') != 'CalledProcessError' or (first/'queue-intent.json').exists()):
+        raise RuntimeError('Replacement requires confirmed absence and diagnosed pre-inference failure')
+    # Charge the failed attempt conservatively at the grant ceiling until cleanup receipt.
+    used=max(0,(first/'runner-cleanup.json').stat().st_mtime-intent['created_at_epoch'])*5/3600
+    remaining_budget=5-used
+    if intent['terminate_at_epoch']-now<900 or remaining_budget<1:
+        raise RuntimeError('Original qualification grant exhausted')
+    return {'terminate_at_epoch':intent['terminate_at_epoch'],'budget_usd':remaining_budget}
+
+
+def run(root, attempt=1):
     root=Path(root).resolve();sys.path.insert(0,str(root/'runtime_snapshot'))
     from production.allocation import AllocationControl,allocate_once,launch_allocation,wait_allocated,watcher_ready
     from production.rental import RunpodControl,enforce
@@ -28,7 +67,7 @@ def run(root):
     credential=Path('/opt/zinaida/private/video/runpod.key')
     ssh_key=Path('/opt/zinaida/private/video/gpu_pilot_ed25519')
     control=RunpodControl(private_token(credential));allocator=AllocationControl(private_token(credential))
-    trial=root/'gpu-trial-01';trial.mkdir(exist_ok=True)
+    trial=root/('gpu-trial-%02d'%attempt);trial.mkdir(exist_ok=True)
     plan=read_json(root/'trial/binding.json');graph=read_json(root/'trial/workflow.json')
     children=[];streams=[];lease=None;ssh=None;intent=None
     def save(name,data):write_json(trial/name,data)
@@ -75,12 +114,17 @@ def run(root):
             if active.get('pods') or active['pagination']['hasNextPage']:
                 raise RuntimeError('Account has resources; do not interfere or allocate')
             now=time.time()
-            intent={'schema_version':1,'approved':True,'created_at_epoch':now,'terminate_at_epoch':now+43*60,
-                'budget_usd':5,'hourly_total_usd':5,'request_sha256':plan['graph_sha256'],
+            grant=recovery_grant(root,attempt,now)
+            save('cold-start-preflight.json',cold_start_check(root,grant,now))
+            public_key=subprocess.check_output(['ssh-keygen','-y','-f',str(ssh_key)],text=True,timeout=5).strip()
+            if not public_key.startswith('ssh-ed25519 '):raise RuntimeError('Existing SSH key binding invalid')
+            intent={'schema_version':1,'approved':True,'created_at_epoch':now,**grant,
+                'hourly_total_usd':5,'request_sha256':plan['graph_sha256'],
                 'body':{'name':'zina-video-'+uuid4().hex,
                 'image':'runpod/pytorch@sha256:e745934b44a4071b1d20a181cdff9e92dc4af3d304cbaafbd0d23f8dacbe5300',
                 'gpu':{'id':'NVIDIA H100 80GB HBM3','count':1},'disk':140,'cloud':'SECURE',
-                'dataCenterIds':['EU-FR-1','AP-IN-1'],'startSsh':True,'startJupyter':False,'ports':['22/tcp']}}
+                'dataCenterIds':['EU-FR-1','AP-IN-1'],'startSsh':True,'startJupyter':False,'ports':['22/tcp'],
+                'env':{'PUBLIC_KEY':public_key}}}
             save('allocation.json',intent)
         else:intent=read_json(trial/'allocation.json')
         if not (trial/'launch.json').exists():save('launch.json',launch_allocation(trial,credential,sys.executable))
@@ -89,7 +133,7 @@ def run(root):
             if time.monotonic()>deadline:raise RuntimeError('Independent watcher not armed')
             time.sleep(.1)
         allocate_once(trial,allocator);lease=wait_allocated(trial,timeout=45)
-        until=time.monotonic()+180
+        until=time.monotonic()+min(300,remaining()-900)
         while time.monotonic()<until:
             pod=control.get(lease['resource']['id'],Runtime(15));direct=(pod or {}).get('ssh',{}).get('direct')
             if direct:break
@@ -97,6 +141,7 @@ def run(root):
         else:raise RuntimeError('SSH readiness deadline')
         save('provider-ready.json',pod)
         opts=['-i',str(ssh_key),'-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=accept-new',
+              '-o','BatchMode=yes','-o','PasswordAuthentication=no',
               '-o','UserKnownHostsFile='+str(trial/'known_hosts'),'-o','ConnectTimeout=10',
               '-o','ServerAliveInterval=10','-o','ServerAliveCountMax=3']
         ssh=['ssh',*opts,'-p',str(direct['port']),direct['username']+'@'+direct['host']]
@@ -199,7 +244,7 @@ def run(root):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--root',required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--root',required=True);p.add_argument('--attempt',type=int,choices=[1,2],default=1);a=p.parse_args()
     def stop(signum,frame):raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
-    print(json.dumps(run(a.root)))
+    print(json.dumps(run(a.root,a.attempt)))
