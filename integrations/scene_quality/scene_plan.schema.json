@@ -1,0 +1,184 @@
+{
+  "type": "object",
+  "properties": {
+    "audience": {
+      "type": "string"
+    },
+    "viewer_promise": {
+      "type": "string"
+    },
+    "emotional_change": {
+      "type": "string"
+    },
+    "visible_turn": {
+      "type": "string"
+    },
+    "ending_action": {
+      "type": "string"
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "new_information": {
+            "type": "string"
+          },
+          "performance": {
+            "type": "string"
+          },
+          "location_id": {
+            "type": "string"
+          },
+          "light_direction": {
+            "type": "string"
+          },
+          "first_frame": {
+            "type": "string"
+          },
+          "last_frame": {
+            "type": "string"
+          },
+          "camera_position": {
+            "type": "string"
+          },
+          "camera_movement": {
+            "type": "string"
+          },
+          "camera_reason": {
+            "type": "string"
+          },
+          "speech_mode": {
+            "type": "string"
+          },
+          "duration_seconds": {
+            "type": "number"
+          },
+          "cast": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "reference_sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "reference_sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "dialogue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "speaker": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "intention": {
+                  "type": "string"
+                },
+                "voice_id": {
+                  "type": "string"
+                },
+                "audio_sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "speaker",
+                "text",
+                "intention",
+                "voice_id",
+                "audio_sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "continuity": {
+            "type": "object",
+            "properties": {
+              "wardrobe": {
+                "type": "string"
+              },
+              "phone_hand": {
+                "type": "string"
+              },
+              "phone_color": {
+                "type": "string"
+              },
+              "hair": {
+                "type": "string"
+              },
+              "light": {
+                "type": "string"
+              },
+              "screen_direction": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "wardrobe",
+              "phone_hand",
+              "phone_color",
+              "hair",
+              "light",
+              "screen_direction"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "new_information",
+          "performance",
+          "location_id",
+          "light_direction",
+          "first_frame",
+          "last_frame",
+          "camera_position",
+          "camera_movement",
+          "camera_reason",
+          "speech_mode",
+          "duration_seconds",
+          "cast",
+          "dialogue",
+          "continuity"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "audience",
+    "viewer_promise",
+    "emotional_change",
+    "visible_turn",
+    "ending_action",
+    "unknowns",
+    "scenes"
+  ],
+  "additionalProperties": false
+}
