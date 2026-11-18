@@ -8,7 +8,7 @@ Before copying22GB to a paid GPU, run dependency_preflight.py with the EXACT act
 
 Install in a private venv only, preserve the CUDA image's matching Torch trio, and use --only-binary=:all: against official registries. av14.2.0 is pinned. requirements.txt contains the GPU preparation pins. This new whole environment has not yet passed a GPU test.
 
-Run: timeout60s ACTUAL_PY dependency_preflight.py --timeout-seconds45 ; add --require-cuda only on an already allocated GPU. The result is dependency readiness, never artistic approval. evaluate.py performs this same preflight before from_pretrained.
+Run: timeout 60s ACTUAL_PY dependency_preflight.py --timeout-seconds 45 ; add --require-cuda only on an already allocated GPU. The result is dependency readiness, never artistic approval. evaluate.py performs this same preflight before from_pretrained.
 
 Next GPU work is PUBLIC SYNTHETIC ONLY. Private film transfer remains blocked by approval review; this code does not override it. The root controller alone owns allocation,20minute deadline, export, deletion and total budget. No Pod is created by these files.
 
@@ -16,4 +16,4 @@ For two public inputs: ACTUAL_PY evaluate.py --model MODEL_DIR --lock model.lock
 
 Do not redownload public HF weights on a paid GPU. Verify CPU cache first, then copy it only AFTER actual dependency imports pass. download_model.py is retained for explicit public CPU-cache maintenance.
 
-A clean CPU-only dependency baseline may use torch2.8.0+cpu/torchvision0.23.0+cpu/torchaudio2.8.0+cpu. The mainserver Python3.13 requires numpy2.2.6 rather than the old Python3.11 GPU pin numpy1.26.4. Such a CPU smoke is not GPU/CUDA compatibility proof.
+A clean CPU-only dependency baseline may use torch2.8.0+cpu/torchvision0.23.0+cpu/torchaudio2.8.0+cpu. The mainserver Python3.13 requires numpy2.2.6 rather than the old Python3.12 GPU pin numpy1.26.4. Such a CPU smoke is not GPU/CUDA compatibility proof.
