@@ -104,3 +104,25 @@ The graph data derives from the existing MIT Comfy-Org workflow pinned in
 licenses. The Lightricks A2V graph was inspected as a reference; its full source
 is not redistributed here. No new weights, GPU or external service is implied
 by installing this package. Publication remains disabled.
+
+`review_packet.py` prepares a separate blind input containing only the opaque
+movie and observation questions. It excludes the creative brief, technical
+hints and references. A separately bound blind response is required before its
+comparison packet can include the brief and frozen references. These prototype
+packets perform no network requests and grant no qualification or owner approval;
+they are not an extra release requirement retroactively imposed on film-v2.
+The local call preflight rejects missing route access, a missing finite grant,
+expired or non-finite deadlines and a request outside the current budget.
+
+`control_lab.py` makes finite local audiovisual input controls from already
+frozen speech. Opaque names and a separate private answer key prevent expected
+words, color order and deliberately short black flashes from leaking into the
+public request. These are objective modality checks, not an eight-scope artistic
+calibration set. The two real generated controls were locally decoded and their
+programmed two-frame defect was found. No model evaluated them yet.
+
+The owner's explicit 2026-11-18 clarification removes visible physical money
+return from the current film's mandatory acceptance criteria. The spoken line
+is sufficient. Absence of an envelope or handover must not trigger rejection,
+delay or a paid regeneration. This scoped decision is preserved in the current
+direction policy and artifact records; it does not waive unrelated requirements.
