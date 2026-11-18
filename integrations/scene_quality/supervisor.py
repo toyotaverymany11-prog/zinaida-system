@@ -92,12 +92,15 @@ def prepare(root, movie, creator_id, ledger, speech=None):
         artifact = {'sha256': source_sha, 'creator_id': creator_id,
                     'duration_seconds': probe['duration_seconds']}
         state = {'schema_version': 1, 'revision': 1, 'artifact': artifact,
-                 'status': 'needs_rework' if rejected else 'needs_qualified_review',
+                 'status': 'needs_rework' if rejected or probe.get('hard_failures') else 'needs_qualified_review',
                  'ready_for_owner': False, 'publication_authorized': False,
                  'owner_rejections': rejected, 'correction_rounds_used': 0,
                  'max_correction_rounds': 2, 'review_history': [],
                  'technical_candidate_findings': probe['candidate_findings'],
                  'technical_report_sha256':file_sha(root/'technical.json')}
+        if probe.get('hard_failures'):
+            state['corrections']=correction_tasks({'findings':probe.get('hard_correction_findings',[])},0,2)
+            for task in state['corrections']['tasks']:task['source_artifact_sha256']=source_sha
         instructions = {
             'artifact': artifact, 'purpose': 'internal_review_only',
             'technical_report': 'technical.json', 'actual_media': 'media.mp4',
@@ -142,9 +145,10 @@ def apply_review(root, review, execution, capability, ledger, expected_revision)
                 raise Invalid('Visual finding without qualified visual input')
         outcome = validate_review(review, artifact, execution)
         technical=json.loads((root/'technical.json').read_text())
-        if (state.get('technical_report_sha256')!=file_sha(root/'technical.json')
-                or technical.get('artifact_sha256')!=artifact['sha256']
-                or technical.get('hard_failures')):
+        technical_bound=(state.get('technical_report_sha256')==file_sha(root/'technical.json')
+                         and technical.get('artifact_sha256')==artifact['sha256'])
+        technical_findings=technical.get('hard_correction_findings',[]) if technical_bound else []
+        if not technical_bound or technical.get('hard_failures'):
             outcome.update(status='needs_rework',ready_for_owner=False)
         rejected = rejections(ledger, artifact['sha256'])
         if rejected:
@@ -152,12 +156,13 @@ def apply_review(root, review, execution, capability, ledger, expected_revision)
         sequence = len(state['review_history']) + 1
         filename = 'review-%03d.json' % sequence
         record = {'review': review, 'execution': execution, 'capability_sha256': digest(capability),
-                  'outcome': outcome}
+                  'outcome': outcome,'technical_correction_findings':technical_findings}
         write(root / filename, record)
         state.update(outcome, owner_rejections=rejected, revision=state['revision'] + 1)
         state['review_history'].append({'file': filename, 'sha256': digest(record)})
         # Preparing instructions does not count as executing a correction.
-        state['corrections'] = correction_tasks(review, state['correction_rounds_used'], state['max_correction_rounds'])
+        combined=dict(review,findings=review['findings']+technical_findings)
+        state['corrections'] = correction_tasks(combined, state['correction_rounds_used'], state['max_correction_rounds'])
         for task in state['corrections']['tasks']:
             task['source_artifact_sha256'] = artifact['sha256']
         write(root / 'state.json', state)

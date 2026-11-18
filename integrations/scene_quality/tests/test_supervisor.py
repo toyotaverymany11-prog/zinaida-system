@@ -131,6 +131,25 @@ class QualityJob(unittest.TestCase):
         r, e, c = self.evidence(); c['audio_perception_qualified'] = False
         with self.assertRaises(Invalid): apply_review(self.job, r, e, c, self.ledger, 1)
 
+    def test_model_green_cannot_override_bound_objective_audio_failure(self):
+        path=self.job/'technical.json';technical=json.loads(path.read_text())
+        technical.update(hard_failures=['audio_timestamp_discontinuity'],hard_correction_findings=[dict(
+            start=.2,end=.3,stage='sound',severity='critical',modality='audio',
+            expected='Continuous PCM clock',observed='Overlapping decoded timestamps',
+            evidence='Measured synthetic fixture',change='Rebuild from frozen WAV',
+            recheck='Continuous timestamps and preserved source offsets')])
+        write(path,technical);state=current(self.job);state['technical_report_sha256']=file_sha(path);write(self.job/'state.json',state)
+        r,e,c=self.evidence();out=apply_review(self.job,r,e,c,self.ledger,1)
+        self.assertFalse(out['ready_for_owner']);self.assertEqual(out['corrections']['tasks'][0]['stage'],'sound')
+        self.assertEqual(out['corrections']['tasks'][0]['source_artifact_sha256'],self.sha)
+        self.assertFalse(delivery_guard(self.job,self.movie,self.ledger)['allowed_as_owner_candidate'])
+
+    def test_mutating_technical_report_after_review_revokes_delivery(self):
+        r,e,c=self.evidence();apply_review(self.job,r,e,c,self.ledger,1)
+        self.assertTrue(delivery_guard(self.job,self.movie,self.ledger)['allowed_as_owner_candidate'])
+        path=self.job/'technical.json';technical=json.loads(path.read_text());technical['hard_failures']=['audio_timestamp_discontinuity'];write(path,technical)
+        self.assertFalse(delivery_guard(self.job,self.movie,self.ledger)['allowed_as_owner_candidate'])
+
     def test_sparse_coverage_cannot_claim_continuous_perception(self):
         r, e, c = self.evidence(); e['coverage']['scope'] = '2fps_sample'
         with self.assertRaises(Invalid): apply_review(self.job, r, e, c, self.ledger, 1)

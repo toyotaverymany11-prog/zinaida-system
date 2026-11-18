@@ -108,6 +108,20 @@ def inspect(path, speech=None):
         'candidate_findings':flashes,'artistic_approval':False,'lip_sync_qualified':False}
     result['audio_timestamps']=inspect_audio_timestamps(path,metadata)
     result['hard_failures']=result['audio_timestamps']['hard_failures']
+    result['hard_correction_findings']=[]
+    for index,stream in result['audio_timestamps']['streams'].items():
+        if stream['continuous'] and stream['decoded_frames']:continue
+        issues=stream['discontinuities']
+        start=min(max(0,duration-1/48000),max(0,min((x['at'] for x in issues),default=0)-.03))
+        end=min(duration,max(start+1/48000,max((x['at'] for x in issues),default=duration)+.03))
+        result['hard_correction_findings'].append({
+            'start':start,'end':end,
+            'stage':'sound','severity':'critical','modality':'audio',
+            'expected':'Decoded audio samples have continuous timestamps',
+            'observed':f'Audio stream{index}: {len(issues)} measured timestamp discontinuities; {stream["decoded_frames"]} decoded frames',
+            'evidence':'ffprobe PCM frame sample counts compared with successive PTS; no claim of hearing a click',
+            'change':'Rebuild continuous PCM from frozen source audio at exact scene boundaries; encode AAC once',
+            'recheck':'No timestamp overlaps/gaps; exact track duration; compare each source WAV and scene offset'})
     if speech:result['source_audio_comparison']=compare_speech(speech,path)
     return result
 
