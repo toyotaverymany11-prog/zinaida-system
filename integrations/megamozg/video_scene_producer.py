@@ -12,10 +12,21 @@ from production.pult_link import binding,collect
 from video_media import MAX_MEDIA_BYTES
 
 
-def scene_producer(root,link,request_id,revisions):
+def scene_producer(root,link,request_id,revisions,*,quality_root=None,quality_ledger=None):
     from production.scene_revision import revision_file
     root=Path(root);link=binding(link);revisions=frozenset(revisions)
     if len(revisions)>20:raise ValueError('too_many_media_versions')
+    quality_root=Path(quality_root) if quality_root is not None else root/'quality'
+    quality_ledger=Path(quality_ledger) if quality_ledger is not None else quality_root/'owner-rejections.json'
+
+    def quality(expected,revision):
+        # No browser-supplied path or model self-certification can open delivery.
+        from integrations.scene_quality.release import guard,read
+        video=current(expected,revision,'video')
+        project=current(expected,revision,'project')
+        result=guard(quality_root,video,project,read(quality_ledger))
+        if result['allowed_as_owner_candidate'] is not True:raise ValueError('video_requires_quality_review')
+        return result
 
     def current(expected,revision,kind):
         if expected!=link or collect(root,link)['state']!='observed':raise ValueError('order_changed')
@@ -25,11 +36,18 @@ def scene_producer(root,link,request_id,revisions):
     def produce(expected,revision,kind):
         if kind=='catalog':
             versions=[]
+            blocked=0
             for item in sorted(revisions):
                 for k in ('video','project'):current(expected,item,k)
+                try:quality(expected,item)
+                except (ValueError,OSError,KeyError,TypeError):
+                    blocked+=1
+                    continue
                 versions.append({'revision':item,'kinds':['video','project']})
-            return {'binding':link,'current':True,'versions':versions}
+            return {'binding':link,'current':True,'versions':versions,
+                    'quality':{'ready':len(versions),'pending_or_rejected':blocked}}
         if kind not in ('video','project'):raise ValueError('invalid_kind')
+        approved=quality(expected,revision)
         path=Path(current(expected,revision,kind)).absolute()
         if any(p.is_symlink() for p in (path,*path.parents)):raise ValueError('media_link')
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -46,6 +64,9 @@ def scene_producer(root,link,request_id,revisions):
             again=Path(current(expected,revision,kind))
             latest=again.stat()
             if (latest.st_dev,latest.st_ino,latest.st_mtime_ns,latest.st_size)!=(before.st_dev,before.st_ino,before.st_mtime_ns,before.st_size):raise ValueError('media_changed')
+            # Owner rejection, reference revocation or review mutation during the
+            # read must revoke both the movie and the editable archive.
+            if quality(expected,revision)!=approved:raise ValueError('quality_changed_during_read')
             return {'binding':link,'revision':revision,'kind':kind,'current':True,
                     'data':data,'sha256':hashlib.sha256(data).hexdigest()}
         finally:os.close(fd)

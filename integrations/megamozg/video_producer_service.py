@@ -29,7 +29,9 @@ def worker(config,request):
         if request['revision'] is not None:raise ValueError('invalid_revision')
         result=collect(entry['root'],link)
     else:
-        result=scene_producer(entry['root'],link,entry['request_id'],entry['revisions'])(link,request['revision'],kind)
+        result=scene_producer(entry['root'],link,entry['request_id'],entry['revisions'],
+                              quality_root=entry.get('quality_root'),
+                              quality_ledger=entry.get('quality_ledger'))(link,request['revision'],kind)
         if 'data' in result:result['data_base64']=base64.b64encode(result.pop('data')).decode()
     return result
 

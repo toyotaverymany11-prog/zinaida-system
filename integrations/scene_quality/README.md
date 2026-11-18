@@ -36,7 +36,40 @@ The live owner-rejected bouquet film is an integration control, never a new
 delivery. No calibrated audiovisual reviewer is registered by this package.
 The review path therefore remains closed for real films until that reviewer
 is qualified. Simulated passing capabilities occur only in unit-test fixtures.
-This does not yet intercept every legacy writer or the installed pult UI.
+The pult's private producer now calls `release.guard` before cataloguing or
+reading a movie or project and again after loading its bytes. A missing quality
+job is closed by default. Internal files remain available to the private reviewer;
+they are not exposed as finished owner candidates. This does not intercept
+unrelated legacy writers or grant public-service deployment by itself.
+
+`qualification.py` measures held-out controls separately for casting, story,
+camera, editing, speech, sound, anatomy and brand. Related source variants cannot
+cross development/holdout splits. Missing responses count as abstentions. A
+critical false pass cannot be averaged away. Counts and95%Wilson upper bounds
+remain visible: a tiny green test set is not a broad reliability guarantee.
+
+`release.py` binds the exact movie and project to the current physical reference
+files, casting manifest, camera rules and creative context before independent
+review. Reference copies are frozen in the review job. The release check
+recomputes calibration, checks its date and route, validates actual coverage,
+re-reads the owner's rejection ledger and rejects mutated evidence. CLI guards
+exit3 when delivery is not permitted, so shell callers cannot interpret a JSON
+denial as success. A candidate is never publication permission or owner approval.
+
+Private producer configuration may set `quality_root` and `quality_ledger` for
+each order. Defaults are `ROOT/quality` and its `owner-rejections.json`. These
+paths are administrator configuration; browser input cannot choose them.
+Policy and calibration files must be supplied by the trusted runner, not copied
+from a model-written answer. No live reviewer is qualified merely by installation.
+
+Lifecycle, with real reference/cast files and a structurally validated plan:
+
+```bash
+python -m integrations.scene_quality.supervisor prepare --job QUALITY/VIDEO_SHA --video MOVIE --ledger LEDGER
+python -m integrations.scene_quality.release bind --root QUALITY --video MOVIE --project PROJECT --context PLAN --ledger LEDGER
+# An independently qualified runner then records exact inputs, execution and findings.
+python -m integrations.scene_quality.release guard --root QUALITY --video MOVIE --project PROJECT --ledger LEDGER
+```
 
 `vimax_bridge.py` reuses the installed ViMax shot schema while preserving an
 explicit sidecar for canonical cast, exact 9:16 geometry and frozen source

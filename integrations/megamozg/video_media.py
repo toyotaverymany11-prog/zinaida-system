@@ -80,7 +80,12 @@ def install(app,store,bindings,producer):
                     or any(x not in ('video','project') for x in item['kinds'])):
                 raise web.HTTPConflict(text='video_not_current')
             versions.append(item)
-        return web.json_response({'versions':versions,'finished_video_accepted':False},headers={'Cache-Control':'no-store'})
+        quality=packet.get('quality',{})
+        pending=quality.get('pending_or_rejected',0)
+        if type(pending) is not int or not 0<=pending<=20:raise web.HTTPConflict(text='video_not_current')
+        return web.json_response({'versions':versions,'finished_video_accepted':False,
+            'quality':{'ready':len(versions),'pending_or_rejected':pending},
+            'status_message':'Видео проходит проверку качества' if pending else 'Проверенные версии доступны' if versions else 'Видео пока нет'},headers={'Cache-Control':'no-store'})
 
     async def serve(request):
         link=links.get(request.match_info['id'])

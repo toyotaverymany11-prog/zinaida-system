@@ -198,3 +198,5 @@ if __name__ == '__main__':
     a = p.parse_args(); ledger = json.loads(Path(a.ledger).read_text())
     result = prepare(a.job, a.video, a.creator, ledger, a.speech) if a.action == 'prepare' else delivery_guard(a.job, a.video, ledger)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if a.action == 'guard' and not result['allowed_as_owner_candidate']:
+        raise SystemExit(3)
