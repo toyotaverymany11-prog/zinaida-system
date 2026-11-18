@@ -111,15 +111,18 @@ def validate_review(review, artifact, execution):
             raise Invalid('Unknown severity')
         for key in ['expected', 'observed', 'evidence', 'change', 'recheck']:
             require_text(finding.get(key), key)
-        if finding.get('modality') == 'audio' and not execution.get('audio_perception_qualified'):
+        if finding.get('modality') not in {'visual', 'audio', 'motion', 'audiovisual'}:
+            raise Invalid('Finding requires an explicit perception modality')
+        if finding.get('modality') in {'audio', 'audiovisual'} and execution.get('audio_perception_qualified') is not True:
             raise Invalid('Audio opinion without qualified audio input')
-        if finding.get('modality') == 'motion' and not execution.get('temporal_input_qualified'):
+        if finding.get('modality') in {'motion', 'audiovisual'} and execution.get('temporal_input_qualified') is not True:
             raise Invalid('Motion opinion based only on stills')
     if verdict == 'reject' and not findings:
         raise Invalid('Rejection requires actionable evidence')
     severe = any(f['severity'] in {'critical', 'major'} for f in findings)
-    complete = (execution.get('visual_input_qualified') and execution.get('temporal_input_qualified')
-                and execution.get('audio_perception_qualified') and execution.get('coverage_complete'))
+    complete = all(execution.get(key) is True for key in
+                   ('visual_input_qualified', 'temporal_input_qualified',
+                    'audio_perception_qualified', 'coverage_complete'))
     ready = (verdict == 'pass_candidate' and not severe and complete
              and execution.get('calibrated_on_heldout_controls') is True)
     return {'status': 'candidate_for_owner' if ready else 'needs_rework' if severe or verdict == 'reject'
