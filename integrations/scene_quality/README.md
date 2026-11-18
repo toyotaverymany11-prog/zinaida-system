@@ -71,6 +71,22 @@ python -m integrations.scene_quality.release bind --root QUALITY --video MOVIE -
 python -m integrations.scene_quality.release guard --root QUALITY --video MOVIE --project PROJECT --ledger LEDGER
 ```
 
+`intake_app.py` preserves the existing Intake HTTP interface and CPU controller.
+Its pinned compatibility read model binds preparation receipts to the stored
+order before derived analysis/status fields are added. A changed backend requires
+requalification. It does not edit the peer PR2 source, bypass its token or create
+a separate queue. Launch an isolated operator instance with
+`python -m integrations.scene_quality.intake_app --root ORDER_ROOT --port PORT`.
+The normal UI template must be present in that source checkout; the read-only
+pult adapter distribution intentionally omits it. The browser qualification uses
+synthetic media and never proves artistic acceptance or authorizes generation.
+
+The Grok subscription client now sends an explicit reasoning effort, defaulting
+to `low` for finite service tasks. Provider documentation states that omitting it
+defaults to `high`. Effort is part of request identity; a timed-out older request
+is never silently resubmitted. Receipts record actual response model IDs,
+fingerprints and timing. Raw reasoning is not treated as an editorial verdict.
+
 `vimax_bridge.py` reuses the installed ViMax shot schema while preserving an
 explicit sidecar for canonical cast, exact 9:16 geometry and frozen source
 speech. The stock text-audio interface fails the executor preflight; a schema

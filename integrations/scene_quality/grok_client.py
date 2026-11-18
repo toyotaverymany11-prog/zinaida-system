@@ -14,17 +14,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def generate(folder, prompt, model='grok-4.7', max_tokens=6000):
-    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
-    identity={'model':model,'prompt_sha256':hashlib.sha256(prompt.encode()).hexdigest(),'max_tokens':max_tokens}
-    marker=folder/'receipt.json';output=folder/'response.json'
-    if marker.exists():
-        rec=json.loads(marker.read_text())
-        if rec['input']!=identity:raise RuntimeError('Request input changed')
-        if rec['status']=='done':return json.loads(output.read_text())
-        raise RuntimeError('Reconcile saved stream before any repeat')
-    if model not in ['grok-4.7','grok-4.6'] or not 1<=len(prompt)<=30000 or not 16<=max_tokens<=8000:
-        raise ValueError('Request outside preflight bounds')
+def subscription_headers(model):
     auth=json.loads(Path('/root/.hermes/auth.json').read_text())['providers']['xai-oauth']
     if auth.get('base_url','').rstrip('/')!='https://cli-chat-proxy.grok.com/v1':
         raise RuntimeError('Existing subscription route changed')
@@ -35,7 +25,28 @@ def generate(folder, prompt, model='grok-4.7', max_tokens=6000):
     headers=helper.hermes_grok_cli_headers()
     headers.update({'Authorization':'Bearer '+auth['tokens']['access_token'],
                     'Content-Type':'application/json','x-grok-model-override':model})
-    body={'model':model,'stream':True,'max_tokens':max_tokens,'response_format':{'type':'json_object'},
+    return headers
+
+
+def generate(folder, prompt, model='grok-4.7', max_tokens=6000, timeout_seconds=150, reasoning_effort='low'):
+    folder=Path(folder);folder.mkdir(parents=True,exist_ok=True)
+    identity={'model':model,'prompt_sha256':hashlib.sha256(prompt.encode()).hexdigest(),
+              'max_tokens':max_tokens,'timeout_seconds':timeout_seconds,'reasoning_effort':reasoning_effort}
+    marker=folder/'receipt.json';output=folder/'response.json'
+    if marker.exists():
+        rec=json.loads(marker.read_text())
+        if rec['input']!=identity:raise RuntimeError('Request input changed')
+        if rec['status']=='done':
+            if hashlib.sha256(output.read_bytes()).hexdigest()!=rec.get('output_sha256'):
+                raise RuntimeError('Saved response changed')
+            return json.loads(output.read_text())
+        raise RuntimeError('Reconcile saved stream before any repeat')
+    if (model not in ['grok-4.7','grok-4.6'] or not 1<=len(prompt)<=30000
+        or not 16<=max_tokens<=8000 or not 30<=timeout_seconds<=300
+        or reasoning_effort not in ['low','medium','high','xhigh']):
+        raise ValueError('Request outside preflight bounds')
+    headers=subscription_headers(model)
+    body={'model':model,'stream':True,'max_tokens':max_tokens,'reasoning_effort':reasoning_effort,'response_format':{'type':'json_object'},
           'messages':[{'role':'system','content':'You are an isolated production analyst. '
             'Use only supplied input. Never call tools or execute actions. '
             'Return JSON only. Do not claim to see images or hear audio that were not supplied. '
@@ -45,7 +56,8 @@ def generate(folder, prompt, model='grok-4.7', max_tokens=6000):
     marker.write_text(json.dumps(rec,indent=2))
     request=urllib.request.Request('https://cli-chat-proxy.grok.com/v1/chat/completions',
         data=json.dumps(body,ensure_ascii=False).encode(),headers=headers)
-    chunks=[];finished=False;finish_reason=None;usage=None;limit=time.monotonic()+150;count=0
+    chunks=[];finished=False;finish_reason=None;usage=None;started=time.monotonic();limit=started+timeout_seconds;count=0
+    observed_models=set();fingerprints=set();reasoning_chars=0;first_content=None
     try:
         with urllib.request.build_opener(NoRedirect).open(request,timeout=25) as response,(folder/'stream.jsonl').open('wb') as saved:
             rec['provider_request_id']=response.headers.get('x-request-id');marker.write_text(json.dumps(rec,indent=2))
@@ -57,20 +69,32 @@ def generate(folder, prompt, model='grok-4.7', max_tokens=6000):
                 part=line[5:].strip()
                 if part==b'[DONE]':finished=True;break
                 a=json.loads(part)
+                if a.get('model'):observed_models.add(a['model'])
+                if a.get('system_fingerprint'):fingerprints.add(a['system_fingerprint'])
+                if len(observed_models)>1:raise RuntimeError('Model changed inside response')
+                if a.get('error'):raise RuntimeError('Provider error in saved stream')
                 if a.get('usage'):usage=a['usage']
                 for choice in a.get('choices',[]):
                     delta=choice.get('delta',{})
                     if delta.get('tool_calls'):raise RuntimeError('Unexpected tool action')
                     content=delta.get('content')
-                    if isinstance(content,str):chunks.append(content)
+                    reasoning_chars+=len(delta.get('reasoning_content') or '')
+                    if isinstance(content,str):
+                        chunks.append(content)
+                        if content and first_content is None:first_content=time.monotonic()-started
                     if choice.get('finish_reason'):finish_reason=choice['finish_reason']
         (folder/'text.txt').write_text(''.join(chunks))
         if not finished or finish_reason not in ['stop','eos']:raise RuntimeError('Incomplete model turn')
         result=json.loads(''.join(chunks));output.write_text(json.dumps(result,ensure_ascii=False,indent=2))
-        rec.update(status='done',usage=usage,tool_calls=0,output_sha256=hashlib.sha256(output.read_bytes()).hexdigest())
+        rec.update(status='done',usage=usage,tool_calls=0,output_sha256=hashlib.sha256(output.read_bytes()).hexdigest(),
+                   observed_models=sorted(observed_models),system_fingerprints=sorted(fingerprints),
+                   reasoning_chars=reasoning_chars,time_to_first_content_seconds=first_content,elapsed_seconds=time.monotonic()-started)
         marker.write_text(json.dumps(rec,indent=2));return result
     except Exception as e:
-        rec.update(status='failed_saved_stream',error_type=type(e).__name__,http_status=getattr(e,'code',None))
+        (folder/'partial-text.txt').write_text(''.join(chunks))
+        rec.update(status='failed_saved_stream',error_type=type(e).__name__,http_status=getattr(e,'code',None),
+                   partial_chars=sum(map(len,chunks)),full_turn_finished=False,
+                   observed_models=sorted(observed_models),reasoning_chars=reasoning_chars,elapsed_seconds=time.monotonic()-started)
         marker.write_text(json.dumps(rec,indent=2));raise
 
 
