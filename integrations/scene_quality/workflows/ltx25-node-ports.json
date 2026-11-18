@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "comfy_commit": "ee34406f56f84f6bc89996b8b77a4bedec98a2b9",
+  "source": "actual0.45.0GPUobject_info,31nodes,2026-11-18",
+  "nodes": {
+    "CLIPLoader": {
+      "output": [
+        "CLIP"
+      ]
+    },
+    "CLIPTextEncode": {
+      "output": [
+        "CONDITIONING"
+      ]
+    },
+    "ComfyMathExpression": {
+      "output": [
+        "FLOAT",
+        "INT",
+        "BOOLEAN"
+      ]
+    },
+    "CreateVideo": {
+      "output": [
+        "VIDEO"
+      ]
+    },
+    "EmptyLTXVLatentVideo": {
+      "output": [
+        "LATENT"
+      ]
+    },
+    "KSamplerSelect": {
+      "output": [
+        "SAMPLER"
+      ]
+    },
+    "LTXVAudioVAEEncode": {
+      "output": [
+        "LATENT"
+      ]
+    },
+    "LTXVConcatAVLatent": {
+      "output": [
+        "LATENT"
+      ]
+    },
+    "LTXVConditioning": {
+      "output": [
+        "CONDITIONING",
+        "CONDITIONING"
+      ]
+    },
+    "LTXVDualCFGGuider": {
+      "output": [
+        "GUIDER"
+      ]
+    },
+    "LTXVImgToVideoInplace": {
+      "output": [
+        "LATENT"
+      ]
+    },
+    "LTXVLatentUpsampler": {
+      "output": [
+        "LATENT"
+      ]
+    },
+    "LTXVPreprocess": {
+      "output": [
+        "IMAGE"
+      ]
+    },
+    "LTXVSeparateAVLatent": {
+      "output": [
+        "LATENT",
+        "LATENT"
+      ]
+    },
+    "LatentUpscaleModelLoader": {
+      "output": [
+        "LATENT_UPSCALE_MODEL"
+      ]
+    },
+    "LoadAudio": {
+      "output": [
+        "AUDIO"
+      ]
+    },
+    "LoadImage": {
+      "output": [
+        "IMAGE",
+        "MASK"
+      ]
+    },
+    "ManualSigmas": {
+      "output": [
+        "SIGMAS"
+      ]
+    },
+    "PrimitiveBoolean": {
+      "output": [
+        "BOOLEAN"
+      ]
+    },
+    "PrimitiveInt": {
+      "output": [
+        "INT"
+      ]
+    },
+    "PrimitiveStringMultiline": {
+      "output": [
+        "STRING"
+      ]
+    },
+    "RandomNoise": {
+      "output": [
+        "NOISE"
+      ]
+    },
+    "ResizeImageMaskNode": {
+      "output": [
+        "COMFY_MATCHTYPE_V3"
+      ]
+    },
+    "SamplerCustomAdvanced": {
+      "output": [
+        "LATENT",
+        "LATENT"
+      ]
+    },
+    "SaveVideo": {
+      "output": [
+        "VIDEO"
+      ]
+    },
+    "SetLatentNoiseMask": {
+      "output": [
+        "LATENT"
+      ]
+    },
+    "SolidMask": {
+      "output": [
+        "MASK"
+      ]
+    },
+    "TrimAudioDuration": {
+      "output": [
+        "AUDIO"
+      ]
+    },
+    "UNETLoader": {
+      "output": [
+        "MODEL"
+      ]
+    },
+    "VAEDecodeTiled": {
+      "output": [
+        "IMAGE"
+      ]
+    },
+    "VAELoader": {
+      "output": [
+        "VAE"
+      ]
+    }
+  }
+}
