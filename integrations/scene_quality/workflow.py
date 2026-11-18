@@ -50,6 +50,9 @@ def build(prompt, image, image_sha256, audio, audio_sha256, *, seed=42, frames=1
     graph['398:360'] = {'class_type': 'PrimitiveInt', 'inputs': {'value': height}}
     graph.pop('403', None)
     graph['398:378'] = {'class_type': 'PrimitiveInt', 'inputs': {'value': frames}}
+    # The replaced MathExpression exposed its integer on output1. PrimitiveInt
+    # has only output0; retaining the old edge makes Comfy reject the prompt.
+    graph['398:356']['inputs']['length'] = ['398:378', 0]
     graph['398:361']['inputs']['value'] = fps
     graph['398:339']['inputs']['noise_seed'] = seed
     graph['398:338']['inputs']['noise_seed'] = seed
@@ -99,4 +102,12 @@ def check_runtime_nodes(graph, object_info):
     missing = sorted({n['class_type'] for n in graph.values()} - set(object_info))
     if missing:
         raise Invalid('Runtime lacks required nodes: ' + ','.join(missing))
+    for node in graph.values():
+        for name, value in node['inputs'].items():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+                if value[0] not in graph:
+                    raise Invalid('Runtime edge has no source: ' + name)
+                outputs = object_info[graph[value[0]]['class_type']].get('output')
+                if outputs is not None and (type(value[1]) is not int or not 0 <= value[1] < len(outputs)):
+                    raise Invalid('Runtime output index does not exist: ' + value[0] + ':' + str(value[1]))
     return {'status': 'node_names_present_not_model_qualified'}
