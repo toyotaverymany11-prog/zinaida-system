@@ -96,7 +96,8 @@ def prepare(root, movie, creator_id, ledger, speech=None):
                  'ready_for_owner': False, 'publication_authorized': False,
                  'owner_rejections': rejected, 'correction_rounds_used': 0,
                  'max_correction_rounds': 2, 'review_history': [],
-                 'technical_candidate_findings': probe['candidate_findings']}
+                 'technical_candidate_findings': probe['candidate_findings'],
+                 'technical_report_sha256':file_sha(root/'technical.json')}
         instructions = {
             'artifact': artifact, 'purpose': 'internal_review_only',
             'technical_report': 'technical.json', 'actual_media': 'media.mp4',
@@ -140,6 +141,11 @@ def apply_review(root, review, execution, capability, ledger, expected_revision)
             if f.get('modality') in {'visual', 'motion', 'audiovisual'} and execution.get('visual_input_qualified') is not True:
                 raise Invalid('Visual finding without qualified visual input')
         outcome = validate_review(review, artifact, execution)
+        technical=json.loads((root/'technical.json').read_text())
+        if (state.get('technical_report_sha256')!=file_sha(root/'technical.json')
+                or technical.get('artifact_sha256')!=artifact['sha256']
+                or technical.get('hard_failures')):
+            outcome.update(status='needs_rework',ready_for_owner=False)
         rejected = rejections(ledger, artifact['sha256'])
         if rejected:
             outcome.update(status='needs_rework', ready_for_owner=False)
@@ -187,6 +193,10 @@ def delivery_guard(root, movie, ledger):
         actual = file_sha(movie)
         permitted = (actual == state['artifact']['sha256'] and state['ready_for_owner'] is True
                      and state['status'] == 'candidate_for_owner' and not rejections(ledger, actual))
+        technical=json.loads((Path(root)/'technical.json').read_text())
+        permitted=permitted and (state.get('technical_report_sha256')==file_sha(Path(root)/'technical.json')
+                    and technical.get('artifact_sha256')==actual and technical.get('hard_failures')==[]
+                    and technical.get('audio_timestamps',{}).get('checked') is True)
         return {'artifact_sha256': actual, 'allowed_as_owner_candidate': permitted,
                 'reason': 'qualified_candidate' if permitted else 'not_qualified_for_owner_delivery',
                 'publication_authorized': False}

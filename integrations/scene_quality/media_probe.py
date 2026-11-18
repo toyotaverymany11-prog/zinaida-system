@@ -46,6 +46,30 @@ def ranges(indices):
     return out
 
 
+def audio_continuity(frames, sample_rate):
+    """Measure decoded PCM against timestamps; codec tail padding is allowed."""
+    issues=[]
+    for i in range(1,len(frames)):
+        a,b=frames[i-1],frames[i]
+        expected=float(a['pts_time'])+int(a['nb_samples'])/sample_rate
+        delta=float(b['pts_time'])-expected
+        if abs(delta)>max(.0001,2/sample_rate):
+            issues.append({'frame':i,'at':float(b['pts_time']),'delta_seconds':delta})
+    return {'decoded_frames':len(frames),'decoded_sample_duration':sum(int(f['nb_samples']) for f in frames)/sample_rate,
+            'discontinuities':issues,'continuous':not issues}
+
+
+def inspect_audio_timestamps(path, metadata):
+    audio={s['index']:int(s['sample_rate']) for s in metadata['streams'] if s['codec_type']=='audio'}
+    if not audio:return {'checked':True,'streams':{},'hard_failures':[]}
+    decoded=json.loads(subprocess.check_output(['ffprobe','-v','error','-select_streams','a',
+        '-show_frames','-show_entries','frame=stream_index,pts_time,nb_samples','-of','json',str(path)],timeout=90))
+    streams={str(k):audio_continuity([f for f in decoded['frames'] if f['stream_index']==k],v) for k,v in audio.items()}
+    failed=any(not s['continuous'] or not s['decoded_frames'] for s in streams.values())
+    return {'checked':True,'streams':streams,
+            'hard_failures':['audio_timestamp_discontinuity'] if failed else []}
+
+
 def inspect(path, speech=None):
     path=Path(path)
     metadata=json.loads(subprocess.check_output(['ffprobe','-v','error','-count_frames',
@@ -82,6 +106,8 @@ def inspect(path, speech=None):
         'observations':{'near_black_ranges':black,'low_change_ranges':ranges((np.flatnonzero(delta<.08)+1).tolist()),
                         'low_change_is_not_automatic_rejection':True},
         'candidate_findings':flashes,'artistic_approval':False,'lip_sync_qualified':False}
+    result['audio_timestamps']=inspect_audio_timestamps(path,metadata)
+    result['hard_failures']=result['audio_timestamps']['hard_failures']
     if speech:result['source_audio_comparison']=compare_speech(speech,path)
     return result
 
