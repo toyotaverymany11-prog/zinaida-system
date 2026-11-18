@@ -69,6 +69,8 @@ def run(root, attempt=1):
     control=RunpodControl(private_token(credential));allocator=AllocationControl(private_token(credential))
     trial=root/('gpu-trial-%02d'%attempt);trial.mkdir(exist_ok=True)
     plan=read_json(root/'trial/binding.json');graph=read_json(root/'trial/workflow.json')
+    from integrations.scene_quality.workflow import validate_static_ports
+    validate_static_ports(graph)  # Fail before any paid resource for stale edges.
     children=[];streams=[];lease=None;ssh=None;intent=None
     def save(name,data):write_json(trial/name,data)
     def remaining():return max(0,(intent or {}).get('terminate_at_epoch',time.time())-time.time())
