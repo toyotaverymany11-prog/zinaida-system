@@ -1,0 +1,33 @@
+--- a/pult_ui/workboard.js
++++ b/pult_ui/workboard.js
+@@ -159,7 +159,7 @@
+  panel.append(node('p','Приёмка готового фильма этим состоянием не подтверждается.'));
+  if(d.state==='observed'){
+   let media;try{media=await call('/api/workboard/tasks/'+encodeURIComponent(t.id)+'/video/media')}
+-  catch(e){return}
++  catch(e){media={versions:[]}}
+   if(generation!==detailGeneration||!panel.isConnected)return;
+   for(const item of media.versions||[]){
+    const base='/api/workboard/tasks/'+encodeURIComponent(t.id)+'/video/media/'+encodeURIComponent(item.revision);
+@@ -168,6 +168,21 @@
+    if(item.kinds.includes('project')){const link=node('a','Скачать монтажный комплект');link.href=base+'/project';panel.append(link)}
+   }
+  }
++ // Imported owner films remain a separate draft view, including while candidate QA is pending.
++ if(me.role==='owner'&&d.state==='observed'){
++  let imported;try{imported=await call('/api/workboard/tasks/'+encodeURIComponent(t.id)+'/video/imported-drafts')}
++  catch(e){return}
++  if(generation!==detailGeneration||!panel.isConnected)return;
++  if(imported.status!=='draft'||imported.ready_for_owner!==false||imported.finished_video_accepted!==false||imported.publication_authorized!==false)return;
++  for(const item of imported.drafts||[]){
++   if(item.source_kind!=='imported_film'||!/^[a-f0-9]{64}$/.test(item.artifact_id)||!/^[a-f0-9]{64}$/.test(item.sha256))continue;
++   const box=node('article','');box.dataset.ownerImportedDraft='true';box.dataset.artifactId=item.artifact_id;box.dataset.sha256=item.sha256;
++   box.append(node('h4',item.title),node('p','Черновик, проверка не завершена'),node('small','Сохранённая сборка · '+Number(item.duration_seconds).toLocaleString('ru-RU')+' с'));
++   const video=node('video','');video.controls=true;video.playsInline=true;video.preload='metadata';video.style.maxWidth='100%';video.dataset.artifactId=item.artifact_id;video.dataset.sha256=item.sha256;
++   video.src='/api/workboard/tasks/'+encodeURIComponent(t.id)+'/video/imported-drafts/'+encodeURIComponent(item.artifact_id)+'/video';box.append(video);panel.append(box);
++  }
++ }
++
+ }
+ 
+ async function open(id,{scroll=true,navigate=true,preserve=false}={}){selectedId=id;const generation=++detailGeneration;const t=await call('/api/workboard/tasks/'+encodeURIComponent(id));if(generation!==detailGeneration)return;if(preserve&&($('boardEditForm')||attachmentSelected()||($('boardDetail').contains(document.activeElement)&&document.activeElement.matches('input,select,textarea'))||($('boardDetail').dataset.videoTaskId===t.id&&$('boardDetail').dataset.videoTaskRevision===String(t.revision)&&Array.from($('boardDetail').querySelectorAll('video')).some(v=>!v.paused&&!v.ended))))return;const root=$('boardDetail');if(navigate)setRoute({task:id});root.hidden=false;root.replaceChildren();root.append(button('Закрыть карточку',()=>{selectedId=null;detailGeneration++;root.hidden=true;setRoute({task:null})}));const city=node('a','К обзору офиса');city.id='boardCityLink';city.href=cityHref(t.id);city.style.cssText='display:inline-flex;align-items:center;min-height:44px;margin:0 12px;padding:0 4px';city.onclick=()=>{city.href=cityHref(t.id)};root.append(city);root.append(node('h3',t.title),node('p',person(t.assignee_user_id,t.assignee_kind)+' · '+stateLabel(t)),node('pre',t.description),node('strong','Ожидаемый результат'),node('pre',t.expected_result));if(t.result_note)root.append(node('strong','Последнее обновление'),node('pre',t.result_note));if(t.evidence)root.append(node('strong','Результат и подтверждения'),node('pre',t.evidence));if(t.waiting_on)root.append(node('p','Ожидает '+who[t.waiting_on]+': '+t.waiting_reason));if(t.next_step)root.append(node('p','Следующий шаг: '+t.next_step));const a=node('div','');a.className='row';root.append(a);const mine=t.assignee_user_id===me.id&&t.assignee_kind==='human',finished=['accepted','cancelled'].includes(t.status);

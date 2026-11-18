@@ -25,7 +25,16 @@ def worker(config,request):
     # routes before and after this RPC. The producer admits only that OS UID
     # and this fixed configuration; it must not open the web system's WAL DB.
     kind=request['kind']
-    if kind=='metadata':
+    if kind in {'owner_imported_draft_catalog','owner_imported_draft_video'}:
+        from video_imported_draft import imported_draft_producer
+        result=imported_draft_producer(entry['root'],link,entry.get('owner_imported_drafts'))(link,request['revision'],kind)
+        if 'data' in result:result['data_base64']=base64.b64encode(result.pop('data')).decode()
+    elif kind in {'owner_draft_catalog','owner_draft_video'}:
+        from video_owner_preview import owner_draft_producer
+        allowed=entry.get('owner_draft_previews')
+        result=owner_draft_producer(entry['root'],link,entry['request_id'],allowed)(link,request['revision'],kind)
+        if 'data' in result:result['data_base64']=base64.b64encode(result.pop('data')).decode()
+    elif kind=='metadata':
         if request['revision'] is not None:raise ValueError('invalid_revision')
         result=collect(entry['root'],link)
     else:
