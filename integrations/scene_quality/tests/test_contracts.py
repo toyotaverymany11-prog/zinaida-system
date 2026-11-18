@@ -57,6 +57,17 @@ class QualityContracts(unittest.TestCase):
 
 
 class AudioDrivenWorkflow(unittest.TestCase):
+    def test_replaced_frame_constant_uses_its_only_integer_output(self):
+        graph, _ = build('A speaking adult', 'frame.jpg', 'a'*64,
+                         'speech.wav', 'b'*64)
+        self.assertEqual(graph['398:356']['inputs']['length'], ['398:378', 0])
+        metadata = {n['class_type']: {} for n in graph.values()}
+        metadata['PrimitiveInt'] = {'output': ['INT']}
+        check_runtime_nodes(graph, metadata)
+        graph['398:356']['inputs']['length'][1] = 1
+        with self.assertRaises(ValueError):
+            check_runtime_nodes(graph, metadata)
+
     def make(self,**kw):return build('Specific natural performance','actor.png','a'*64,'speech.wav','b'*64,**kw)
 
     def test_original_audio_frozen_in_both_stages_and_preserved_at_output(self):
