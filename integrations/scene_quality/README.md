@@ -38,6 +38,13 @@ The review path therefore remains closed for real films until that reviewer
 is qualified. Simulated passing capabilities occur only in unit-test fixtures.
 This does not yet intercept every legacy writer or the installed pult UI.
 
+`vimax_bridge.py` reuses the installed ViMax shot schema while preserving an
+explicit sidecar for canonical cast, exact 9:16 geometry and frozen source
+speech. The stock text-audio interface fails the executor preflight; a schema
+conversion never silently authorizes generation. The first bundle remains an
+internal one-shot proposal. Its framing and audio-driven executor are not live
+qualified. Review of 124 upstream materials is documented in the research report.
+
 Tests: `python -m unittest discover -s integrations/scene_quality/tests -v`.
 They check consequential failures: stale reviews, self-approval, missing actual
 modalities, critical findings hidden by a passing verdict, and replacement of
