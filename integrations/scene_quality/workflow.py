@@ -88,6 +88,7 @@ def build(prompt, image, image_sha256, audio, audio_sha256, *, seed=42, frames=1
                 visit(value[0])
     visit('75')
     graph = {k: v for k, v in graph.items() if k in needed}
+    validate_static_ports(graph)
     binding = {'schema_version': 1, 'recipe': 'ltx25-a2v-internal-qualification',
                'image': {'name': image, 'sha256': image_sha256},
                'speech': {'name': audio, 'sha256': audio_sha256, 'frozen': True,
@@ -96,6 +97,11 @@ def build(prompt, image, image_sha256, audio, audio_sha256, *, seed=42, frames=1
                'graph_sha256': digest(graph), 'status': 'prepared_gpu_unqualified',
                'artistic_approval': False, 'publication': False}
     return graph, binding
+
+
+def validate_static_ports(graph):
+    schema = json.loads((HERE/'workflows/ltx25-node-ports.json').read_text())
+    return check_runtime_nodes(graph, schema['nodes'])
 
 
 def check_runtime_nodes(graph, object_info):
